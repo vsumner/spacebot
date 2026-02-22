@@ -1197,7 +1197,10 @@ impl Channel {
             .prompts
             .load()
             .render_system_retrigger()
-            .expect("failed to render retrigger message");
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "failed to render retrigger message");
+                "Background work completed; continue processing.".to_string()
+            });
 
         let synthetic = InboundMessage {
             id: uuid::Uuid::new_v4().to_string(),
@@ -1269,7 +1272,7 @@ pub async fn spawn_branch_from_state(
             &rc.instance_dir.display().to_string(),
             &rc.workspace_dir.display().to_string(),
         )
-        .expect("failed to render branch prompt");
+        .map_err(|error| AgentError::Other(error.into()))?;
 
     spawn_branch(
         state,
@@ -1293,10 +1296,10 @@ async fn spawn_memory_persistence_branch(
     let prompt_engine = deps.runtime_config.prompts.load();
     let system_prompt = prompt_engine
         .render_static("memory_persistence")
-        .expect("failed to render memory_persistence prompt");
+        .map_err(|error| AgentError::Other(error.into()))?;
     let prompt = prompt_engine
         .render_system_memory_persistence()
-        .expect("failed to render memory persistence prompt");
+        .map_err(|error| AgentError::Other(error.into()))?;
 
     spawn_branch(
         state,
