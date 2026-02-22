@@ -246,7 +246,7 @@ Per-agent visibility endpoints:
 - `GET /api/agents/mcp` — list configured MCP servers and their connection status
 - `POST /api/agents/mcp/reconnect` — force reconnect a specific server by name
 
-CRUD endpoints for managing `[[mcp_servers]]` in config.toml:
+CRUD endpoints for managing `[[defaults.mcp]]` in config.toml:
 
 - `GET /api/mcp/servers` — list all configured servers with live connection state
 - `POST /api/mcp/servers` — add a new server definition to config.toml
@@ -254,6 +254,8 @@ CRUD endpoints for managing `[[mcp_servers]]` in config.toml:
 - `DELETE /api/mcp/servers/{name}` — remove a server definition
 - `POST /api/mcp/servers/{name}/reconnect` — force-reconnect a specific server across all agents
 - `GET /api/mcp/status` — per-agent connection status
+
+Legacy `[[mcp_servers]]` entries are accepted for backward compatibility during config loading, but new writes and API edits target `[[defaults.mcp]]`.
 
 ### Shutdown
 

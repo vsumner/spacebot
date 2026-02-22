@@ -1,4 +1,4 @@
-use super::state::ApiState;
+use super::state::{ApiEvent, ApiState};
 
 use axum::Json;
 use axum::extract::{Query, State};
@@ -106,6 +106,8 @@ pub(super) async fn reload_all_runtime_configs(
             .reload_config(new_config, &agent_id, &mcp_manager)
             .await;
     }
+
+    state.send_event(ApiEvent::ConfigReloaded);
 }
 
 /// Sync bindings and messaging permission snapshots from a parsed config snapshot.
@@ -480,6 +482,8 @@ pub(super) async fn update_agent_config(
             arc_swap.store(std::sync::Arc::new(new_perms));
         }
     }
+
+    state.send_event(ApiEvent::ConfigReloaded);
 
     get_agent_config(
         State(state),

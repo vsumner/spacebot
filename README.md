@@ -223,18 +223,20 @@ Connect workers to external [MCP](https://modelcontextprotocol.io/) (Model Conte
 - **API management** — full CRUD API under `/api/mcp/` for managing server definitions and monitoring connection status programmatically
 
 ```toml
-[[mcp_servers]]
+[[defaults.mcp]]
 name = "filesystem"
 transport = "stdio"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
 
-[[mcp_servers]]
+[[defaults.mcp]]
 name = "sentry"
 transport = "http"
 url = "https://mcp.sentry.io"
 headers = { Authorization = "Bearer ${SENTRY_TOKEN}" }
 ```
+
+Legacy `[[mcp_servers]]` entries are still loaded for compatibility, but `[[defaults.mcp]]` is the canonical location.
 
 ---
 
