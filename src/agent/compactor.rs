@@ -108,9 +108,19 @@ impl Compactor {
         let channel_id = self.channel_id.clone();
         let deps = self.deps.clone();
         let prompt_engine = deps.runtime_config.prompts.load();
-        let compactor_prompt = prompt_engine
-            .render_static("compactor")
-            .expect("failed to render compactor prompt");
+        let compactor_prompt = match prompt_engine.render_static("compactor") {
+            Ok(prompt) => prompt,
+            Err(error) => {
+                tracing::error!(
+                    channel_id = %self.channel_id,
+                    %error,
+                    "failed to render compactor prompt"
+                );
+                let mut flag = self.is_compacting.write().await;
+                *flag = false;
+                return;
+            }
+        };
 
         tokio::spawn(async move {
             let result = run_compaction(&deps, &compactor_prompt, &history, fraction).await;
@@ -155,9 +165,7 @@ impl Compactor {
 
         // Insert a marker at the beginning
         let prompt_engine = self.deps.runtime_config.prompts.load();
-        let marker = prompt_engine
-            .render_system_truncation(remove_count)
-            .expect("failed to render truncation message");
+        let marker = prompt_engine.render_system_truncation(remove_count)?;
         history.insert(0, Message::from(marker));
 
         tracing::warn!(

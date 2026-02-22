@@ -389,13 +389,19 @@ impl Messaging for TelegramAdapter {
                 );
             }
             OutboundResponse::StreamChunk(text) => {
-                let mut active = self.active_messages.write().await;
-                if let Some(stream) = active.get_mut(&message.conversation_id) {
-                    // Rate-limit edits to avoid Telegram API throttling
-                    if stream.last_edit.elapsed() < STREAM_EDIT_INTERVAL {
-                        return Ok(());
-                    }
+                let stream_target = {
+                    let active = self.active_messages.read().await;
+                    active.get(&message.conversation_id).and_then(|stream| {
+                        // Rate-limit edits to avoid Telegram API throttling.
+                        if stream.last_edit.elapsed() < STREAM_EDIT_INTERVAL {
+                            None
+                        } else {
+                            Some((stream.chat_id, stream.message_id))
+                        }
+                    })
+                };
 
+                if let Some((chat_id, message_id)) = stream_target {
                     let display_text = if text.len() > MAX_MESSAGE_LENGTH {
                         let end = text.floor_char_boundary(MAX_MESSAGE_LENGTH - 3);
                         format!("{}...", &text[..end])
@@ -405,13 +411,19 @@ impl Messaging for TelegramAdapter {
 
                     if let Err(error) = self
                         .bot
-                        .edit_message_text(stream.chat_id, stream.message_id, display_text)
+                        .edit_message_text(chat_id, message_id, display_text)
                         .send()
                         .await
                     {
                         tracing::debug!(%error, "failed to edit streaming message");
                     }
-                    stream.last_edit = Instant::now();
+
+                    let mut active = self.active_messages.write().await;
+                    if let Some(stream) = active.get_mut(&message.conversation_id)
+                        && stream.message_id == message_id
+                    {
+                        stream.last_edit = Instant::now();
+                    }
                 }
             }
             OutboundResponse::StreamEnd => {

@@ -63,19 +63,20 @@ impl ChannelState {
     /// Cancel a running worker by aborting its tokio task and cleaning up state.
     /// Returns an error message if the worker is not found.
     pub async fn cancel_worker(&self, worker_id: WorkerId) -> std::result::Result<(), String> {
-        let handle = self.worker_handles.write().await.remove(&worker_id);
         let removed = self
             .active_workers
             .write()
             .await
             .remove(&worker_id)
             .is_some();
+        let handle = self.worker_handles.write().await.remove(&worker_id);
         self.worker_inputs.write().await.remove(&worker_id);
+        let status_removed = self.status_block.write().await.remove_worker(worker_id);
 
         if let Some(handle) = handle {
             handle.abort();
             Ok(())
-        } else if removed {
+        } else if removed || status_removed {
             // Worker was in active_workers but had no handle (shouldn't happen, but handle gracefully)
             Ok(())
         } else {
@@ -465,11 +466,15 @@ impl Channel {
                         .get("telegram_chat_type")
                         .and_then(|v| v.as_str())
                 });
-            self.conversation_context = Some(
-                prompt_engine
-                    .render_conversation_context(&first.source, server_name, channel_name)
-                    .expect("failed to render conversation context"),
-            );
+            match prompt_engine.render_conversation_context(&first.source, server_name, channel_name)
+            {
+                Ok(context) => {
+                    self.conversation_context = Some(context);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "failed to render conversation context");
+                }
+            }
         }
 
         // Persist each message to conversation log (individual audit trail)
@@ -560,7 +565,7 @@ impl Channel {
         // Build system prompt with coalesce hint
         let system_prompt = self
             .build_system_prompt_with_coalesce(message_count, elapsed_secs, unique_sender_count)
-            .await;
+            .await?;
 
         {
             let mut reply_target = self.state.reply_target_message_id.write().await;
@@ -597,7 +602,7 @@ impl Channel {
         message_count: usize,
         elapsed_secs: f64,
         unique_senders: usize,
-    ) -> String {
+    ) -> Result<String> {
         let rc = &self.deps.runtime_config;
         let prompt_engine = rc.prompts.load();
 
@@ -611,7 +616,7 @@ impl Channel {
         let opencode_enabled = rc.opencode.load().enabled;
         let worker_capabilities = prompt_engine
             .render_worker_capabilities(browser_enabled, web_search_enabled, opencode_enabled)
-            .expect("failed to render worker capabilities");
+            .map_err(|error| AgentError::Other(error.into()))?;
 
         let status_text = {
             let status = self.state.status_block.read().await;
@@ -628,7 +633,7 @@ impl Channel {
 
         let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
 
-        prompt_engine
+        Ok(prompt_engine
             .render_channel_prompt(
                 empty_to_none(identity_context),
                 empty_to_none(memory_bulletin.to_string()),
@@ -639,7 +644,7 @@ impl Channel {
                 coalesce_hint,
                 available_channels,
             )
-            .expect("failed to render channel prompt")
+            .map_err(|error| AgentError::Other(error.into()))?)
     }
 
     /// Handle an incoming message by running the channel's LLM agent loop.
@@ -719,14 +724,18 @@ impl Channel {
                         .get("telegram_chat_type")
                         .and_then(|v| v.as_str())
                 });
-            self.conversation_context = Some(
-                prompt_engine
-                    .render_conversation_context(&message.source, server_name, channel_name)
-                    .expect("failed to render conversation context"),
-            );
+            match prompt_engine.render_conversation_context(&message.source, server_name, channel_name)
+            {
+                Ok(context) => {
+                    self.conversation_context = Some(context);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "failed to render conversation context");
+                }
+            }
         }
 
-        let system_prompt = self.build_system_prompt().await;
+        let system_prompt = self.build_system_prompt().await?;
 
         {
             let mut reply_target = self.state.reply_target_message_id.write().await;
@@ -798,7 +807,7 @@ impl Channel {
     }
 
     /// Assemble the full system prompt using the PromptEngine.
-    async fn build_system_prompt(&self) -> String {
+    async fn build_system_prompt(&self) -> Result<String> {
         let rc = &self.deps.runtime_config;
         let prompt_engine = rc.prompts.load();
 
@@ -812,7 +821,7 @@ impl Channel {
         let opencode_enabled = rc.opencode.load().enabled;
         let worker_capabilities = prompt_engine
             .render_worker_capabilities(browser_enabled, web_search_enabled, opencode_enabled)
-            .expect("failed to render worker capabilities");
+            .map_err(|error| AgentError::Other(error.into()))?;
 
         let status_text = {
             let status = self.state.status_block.read().await;
@@ -823,7 +832,7 @@ impl Channel {
 
         let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
 
-        prompt_engine
+        Ok(prompt_engine
             .render_channel_prompt(
                 empty_to_none(identity_context),
                 empty_to_none(memory_bulletin.to_string()),
@@ -834,7 +843,7 @@ impl Channel {
                 None, // coalesce_hint - only set for batched messages
                 available_channels,
             )
-            .expect("failed to render channel prompt")
+            .map_err(|error| AgentError::Other(error.into()))?)
     }
 
     /// Register per-turn tools, run the LLM agentic loop, and clean up.
@@ -1418,7 +1427,7 @@ pub async fn spawn_worker_from_state(
             &rc.instance_dir.display().to_string(),
             &rc.workspace_dir.display().to_string(),
         )
-        .expect("failed to render worker prompt");
+        .map_err(|error| AgentError::Other(error.into()))?;
     let skills = rc.skills.load();
     let browser_config = (**rc.browser_config.load()).clone();
     let brave_search_key = (**rc.brave_search_key.load()).clone();
