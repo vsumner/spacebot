@@ -182,7 +182,8 @@ impl CronTool {
                 .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
         {
             return Err(CronError(
-                "'id' must be 1-50 characters, alphanumeric with hyphens and underscores only".into(),
+                "'id' must be 1-50 characters, alphanumeric with hyphens and underscores only"
+                    .into(),
             ));
         }
 
