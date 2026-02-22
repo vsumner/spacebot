@@ -36,6 +36,14 @@ pub(super) async fn reload_all_runtime_configs(
     state: &Arc<ApiState>,
     new_config: &crate::config::Config,
 ) {
+    let llm_manager_guard = state.llm_manager.read().await;
+    if let Some(llm_manager) = llm_manager_guard.as_ref() {
+        llm_manager.reload_config(new_config.llm.clone());
+    }
+    drop(llm_manager_guard);
+
+    state.set_defaults_config(new_config.defaults.clone()).await;
+
     let runtime_configs = state.runtime_configs.load();
     let mcp_managers = state.mcp_managers.load();
     let reload_targets = runtime_configs

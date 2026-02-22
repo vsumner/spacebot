@@ -3,6 +3,7 @@
 //! CRUD endpoints for `[[mcp_servers]]` in config.toml, plus per-agent
 //! connection status.
 
+use super::config::{reload_all_runtime_configs, write_validated_config};
 use super::state::ApiState;
 
 use axum::Json;
@@ -199,9 +200,8 @@ pub(super) async fn create_mcp_server(
         arr.push(new_table);
     }
 
-    tokio::fs::write(&config_path, doc.to_string())
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let new_config = write_validated_config(&config_path, doc.to_string()).await?;
+    reload_all_runtime_configs(&state, &new_config).await;
 
     Ok(Json(MutationResponse {
         success: true,
@@ -279,9 +279,8 @@ pub(super) async fn update_mcp_server(
         }));
     }
 
-    tokio::fs::write(&config_path, doc.to_string())
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let new_config = write_validated_config(&config_path, doc.to_string()).await?;
+    reload_all_runtime_configs(&state, &new_config).await;
 
     Ok(Json(MutationResponse {
         success: true,
@@ -341,9 +340,8 @@ pub(super) async fn delete_mcp_server(
         }));
     }
 
-    tokio::fs::write(&config_path, doc.to_string())
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let new_config = write_validated_config(&config_path, doc.to_string()).await?;
+    reload_all_runtime_configs(&state, &new_config).await;
 
     Ok(Json(MutationResponse {
         success: true,

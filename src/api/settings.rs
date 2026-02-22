@@ -1,3 +1,6 @@
+use super::config::{
+    reload_all_runtime_configs, sync_bindings_and_permissions, write_validated_config,
+};
 use super::state::ApiState;
 
 use axum::Json;
@@ -329,9 +332,8 @@ pub(super) async fn update_global_settings(
         }
     }
 
-    tokio::fs::write(&config_path, doc.to_string())
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let new_config = write_validated_config(&config_path, doc.to_string()).await?;
+    reload_all_runtime_configs(&state, &new_config).await;
 
     let message = if requires_restart {
         "Settings updated. API server changes require a restart to take effect.".to_string()
@@ -412,54 +414,146 @@ pub(super) async fn update_raw_config(
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
 
-    if let Err(error) = crate::config::Config::validate_toml(&request.content) {
-        return Ok(Json(RawConfigUpdateResponse {
-            success: false,
-            message: format!("Validation error: {error}"),
-        }));
-    }
-
-    tokio::fs::write(&config_path, &request.content)
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, "failed to write config.toml");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let new_config = match write_validated_config(&config_path, request.content).await {
+        Ok(config) => config,
+        Err(StatusCode::BAD_REQUEST) => {
+            return Ok(Json(RawConfigUpdateResponse {
+                success: false,
+                message: "Validation error: config could not be applied.".to_string(),
+            }));
+        }
+        Err(status) => return Err(status),
+    };
 
     tracing::info!("config.toml updated via raw editor");
 
-    match crate::config::Config::load_from_path(&config_path) {
-        Ok(new_config) => {
-            let runtime_configs = state.runtime_configs.load();
-            let mcp_managers = state.mcp_managers.load();
-            let reload_targets = runtime_configs
-                .iter()
-                .filter_map(|(agent_id, runtime_config)| {
-                    mcp_managers.get(agent_id).map(|mcp_manager| {
-                        (
-                            agent_id.clone(),
-                            runtime_config.clone(),
-                            mcp_manager.clone(),
-                        )
-                    })
-                })
-                .collect::<Vec<_>>();
-            drop(runtime_configs);
-            drop(mcp_managers);
-
-            for (agent_id, runtime_config, mcp_manager) in reload_targets {
-                runtime_config
-                    .reload_config(&new_config, &agent_id, &mcp_manager)
-                    .await;
-            }
-        }
-        Err(error) => {
-            tracing::warn!(%error, "config.toml written but failed to reload immediately");
-        }
-    }
+    sync_bindings_and_permissions(&state, &new_config).await;
+    reload_all_runtime_configs(&state, &new_config).await;
 
     Ok(Json(RawConfigUpdateResponse {
         success: true,
         message: "Config saved and reloaded.".to_string(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RawConfigUpdateRequest, update_raw_config};
+    use crate::api::state::ApiState;
+    use axum::Json;
+    use axum::extract::State;
+    use std::sync::Arc;
+
+    const VALID_BASE_CONFIG: &str = r#"
+[llm]
+anthropic_key = "test-anthropic-key"
+
+[defaults.routing]
+channel = "anthropic/claude-sonnet-4"
+branch = "anthropic/claude-sonnet-4"
+worker = "anthropic/claude-sonnet-4"
+compactor = "anthropic/claude-sonnet-4"
+cortex = "anthropic/claude-sonnet-4"
+
+[[agents]]
+id = "main"
+default = true
+"#;
+
+    const UPDATED_VALID_CONFIG: &str = r#"
+[llm]
+anthropic_key = "test-anthropic-key"
+
+[defaults.routing]
+channel = "openai/gpt-4.1-mini"
+branch = "openai/gpt-4.1-mini"
+worker = "openai/gpt-4.1-mini"
+compactor = "openai/gpt-4.1-mini"
+cortex = "openai/gpt-4.1-mini"
+
+[[agents]]
+id = "main"
+default = true
+"#;
+
+    fn new_test_state() -> Arc<ApiState> {
+        let (provider_setup_tx, _) = tokio::sync::mpsc::channel(8);
+        let (agent_tx, _) = tokio::sync::mpsc::channel(8);
+        let (agent_remove_tx, _) = tokio::sync::mpsc::channel(8);
+        Arc::new(ApiState::new_with_provider_sender(
+            provider_setup_tx,
+            agent_tx,
+            agent_remove_tx,
+        ))
+    }
+
+    #[tokio::test]
+    async fn update_raw_config_returns_failure_without_persisting_on_invalid_content() {
+        const MISSING_ENV_VAR: &str = "SPACEBOT_TEST_MISSING_PROVIDER_KEY_9C4187220F46465A91C3";
+        let invalid_content = format!(
+            r#"
+[llm.provider.invalid]
+api_type = "openai_completions"
+base_url = "https://api.example.com/v1"
+api_key = "env:{MISSING_ENV_VAR}"
+"#
+        );
+
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let config_path = temp_dir.path().join("config.toml");
+        tokio::fs::write(&config_path, VALID_BASE_CONFIG)
+            .await
+            .expect("config.toml should be written");
+
+        let state = new_test_state();
+        state.set_config_path(config_path.clone()).await;
+
+        let response = update_raw_config(
+            State(state),
+            Json(RawConfigUpdateRequest {
+                content: invalid_content,
+            }),
+        )
+        .await
+        .expect("invalid raw config should return API response")
+        .0;
+
+        assert!(!response.success);
+        assert!(response.message.contains("Validation error"));
+
+        let persisted_content = tokio::fs::read_to_string(&config_path)
+            .await
+            .expect("config should be readable after failed update");
+        assert_eq!(persisted_content, VALID_BASE_CONFIG);
+    }
+
+    #[tokio::test]
+    async fn update_raw_config_persists_valid_content() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let config_path = temp_dir.path().join("config.toml");
+        tokio::fs::write(&config_path, VALID_BASE_CONFIG)
+            .await
+            .expect("config.toml should be written");
+
+        let state = new_test_state();
+        state.set_config_path(config_path.clone()).await;
+
+        let response = update_raw_config(
+            State(state),
+            Json(RawConfigUpdateRequest {
+                content: UPDATED_VALID_CONFIG.to_string(),
+            }),
+        )
+        .await
+        .expect("valid raw config should succeed")
+        .0;
+
+        assert!(response.success);
+        assert!(response.message.contains("saved and reloaded"));
+
+        let persisted_content = tokio::fs::read_to_string(&config_path)
+            .await
+            .expect("config should be readable after update");
+        assert_eq!(persisted_content, UPDATED_VALID_CONFIG);
+    }
 }
