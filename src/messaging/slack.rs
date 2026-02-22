@@ -139,9 +139,14 @@ async fn handle_message_event(
     }
 
     let state_guard = states.read().await;
-    let adapter_state = state_guard
+    let Some(adapter_state) = state_guard
         .get_user_state::<Arc<SlackAdapterState>>()
-        .expect("SlackAdapterState must be in user_state");
+        .cloned()
+    else {
+        tracing::error!("missing SlackAdapterState in socket mode user_state");
+        return Ok(());
+    };
+    drop(state_guard);
 
     let user_id = msg_event.sender.user.as_ref().map(|u| u.0.clone());
 
@@ -238,9 +243,14 @@ async fn handle_app_mention_event(
     states: SlackClientEventsUserState,
 ) -> UserCallbackResult<()> {
     let state_guard = states.read().await;
-    let adapter_state = state_guard
+    let Some(adapter_state) = state_guard
         .get_user_state::<Arc<SlackAdapterState>>()
-        .expect("SlackAdapterState must be in user_state");
+        .cloned()
+    else {
+        tracing::error!("missing SlackAdapterState in socket mode user_state");
+        return Ok(());
+    };
+    drop(state_guard);
 
     let user_id = mention.user.0.clone();
 
@@ -337,9 +347,17 @@ async fn handle_command_event(
     states: SlackClientEventsUserState,
 ) -> UserCallbackResult<SlackCommandEventResponse> {
     let state_guard = states.read().await;
-    let adapter_state = state_guard
+    let Some(adapter_state) = state_guard
         .get_user_state::<Arc<SlackAdapterState>>()
-        .expect("SlackAdapterState must be in user_state");
+        .cloned()
+    else {
+        tracing::error!("missing SlackAdapterState in socket mode user_state");
+        return Ok(SlackCommandEventResponse {
+            content: SlackMessageContent::new(),
+            response_type: Some(SlackMessageResponseType::Ephemeral),
+        });
+    };
+    drop(state_guard);
 
     let command_str = event.command.0.clone();
     let team_id = event.team_id.0.clone();
@@ -476,9 +494,14 @@ async fn handle_interaction_event(
     };
 
     let state_guard = states.read().await;
-    let adapter_state = state_guard
+    let Some(adapter_state) = state_guard
         .get_user_state::<Arc<SlackAdapterState>>()
-        .expect("SlackAdapterState must be in user_state");
+        .cloned()
+    else {
+        tracing::error!("missing SlackAdapterState in socket mode user_state");
+        return Ok(());
+    };
+    drop(state_guard);
 
     let user_id = block_actions
         .user

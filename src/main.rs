@@ -129,7 +129,7 @@ struct ActiveChannel {
 fn main() -> anyhow::Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
-        .expect("failed to install rustls crypto provider");
+        .map_err(|error| anyhow::anyhow!("failed to install rustls crypto provider: {error:?}"))?;
 
     let cli = Cli::parse();
     let command = cli.command.unwrap_or(Command::Start { foreground: false });
@@ -559,18 +559,20 @@ fn get_agent_config<'a>(
     config: &'a spacebot::config::Config,
     agent_id: Option<&str>,
 ) -> anyhow::Result<&'a spacebot::config::AgentConfig> {
-    let agent_id = agent_id.unwrap_or_else(|| {
-        if config.agents.is_empty() {
-            panic!("no agents configured");
-        }
-        &config.agents[0].id
-    });
+    let resolved_agent_id = match agent_id {
+        Some(id) => id,
+        None => config
+            .agents
+            .first()
+            .map(|agent| agent.id.as_str())
+            .ok_or_else(|| anyhow::anyhow!("no agents configured"))?,
+    };
 
     config
         .agents
         .iter()
-        .find(|a| a.id == agent_id)
-        .with_context(|| format!("agent not found: {agent_id}"))
+        .find(|agent| agent.id == resolved_agent_id)
+        .with_context(|| format!("agent not found: {resolved_agent_id}"))
 }
 
 fn load_config(
@@ -607,11 +609,8 @@ async fn run(
     let (agent_remove_tx, mut agent_remove_rx) = mpsc::channel::<String>(8);
 
     // Start HTTP API server if enabled
-    let mut api_state = spacebot::api::ApiState::new_with_provider_sender(
-        provider_tx,
-        agent_tx,
-        agent_remove_tx,
-    );
+    let mut api_state =
+        spacebot::api::ApiState::new_with_provider_sender(provider_tx, agent_tx, agent_remove_tx);
     api_state.auth_token = config.api.auth_token.clone();
     let api_state = Arc::new(api_state);
 
@@ -1371,13 +1370,13 @@ async fn initialize_agents(
     if let Some(discord_config) = &config.messaging.discord
         && discord_config.enabled
     {
-        let adapter = spacebot::messaging::discord::DiscordAdapter::new(
-            &discord_config.token,
-            discord_permissions
-                .clone()
-                .expect("discord permissions initialized when discord is enabled"),
-        );
-        new_messaging_manager.register(adapter).await;
+        if let Some(perms) = discord_permissions.clone() {
+            let adapter =
+                spacebot::messaging::discord::DiscordAdapter::new(&discord_config.token, perms);
+            new_messaging_manager.register(adapter).await;
+        } else {
+            tracing::warn!("discord enabled but permissions were not initialized");
+        }
     }
 
     // Shared Slack permissions (hot-reloadable via file watcher)
@@ -1392,20 +1391,22 @@ async fn initialize_agents(
     if let Some(slack_config) = &config.messaging.slack
         && slack_config.enabled
     {
-        match spacebot::messaging::slack::SlackAdapter::new(
-            &slack_config.bot_token,
-            &slack_config.app_token,
-            slack_permissions
-                .clone()
-                .expect("slack permissions initialized when slack is enabled"),
-            slack_config.commands.clone(),
-        ) {
-            Ok(adapter) => {
-                new_messaging_manager.register(adapter).await;
+        if let Some(perms) = slack_permissions.clone() {
+            match spacebot::messaging::slack::SlackAdapter::new(
+                &slack_config.bot_token,
+                &slack_config.app_token,
+                perms,
+                slack_config.commands.clone(),
+            ) {
+                Ok(adapter) => {
+                    new_messaging_manager.register(adapter).await;
+                }
+                Err(error) => {
+                    tracing::error!(%error, "failed to build slack adapter");
+                }
             }
-            Err(error) => {
-                tracing::error!(%error, "failed to build slack adapter");
-            }
+        } else {
+            tracing::warn!("slack enabled but permissions were not initialized");
         }
     }
 
@@ -1419,13 +1420,13 @@ async fn initialize_agents(
     if let Some(telegram_config) = &config.messaging.telegram
         && telegram_config.enabled
     {
-        let adapter = spacebot::messaging::telegram::TelegramAdapter::new(
-            &telegram_config.token,
-            telegram_permissions
-                .clone()
-                .expect("telegram permissions initialized when telegram is enabled"),
-        );
-        new_messaging_manager.register(adapter).await;
+        if let Some(perms) = telegram_permissions.clone() {
+            let adapter =
+                spacebot::messaging::telegram::TelegramAdapter::new(&telegram_config.token, perms);
+            new_messaging_manager.register(adapter).await;
+        } else {
+            tracing::warn!("telegram enabled but permissions were not initialized");
+        }
     }
 
     if let Some(webhook_config) = &config.messaging.webhook
@@ -1449,16 +1450,18 @@ async fn initialize_agents(
     if let Some(twitch_config) = &config.messaging.twitch
         && twitch_config.enabled
     {
-        let adapter = spacebot::messaging::twitch::TwitchAdapter::new(
-            &twitch_config.username,
-            &twitch_config.oauth_token,
-            twitch_config.channels.clone(),
-            twitch_config.trigger_prefix.clone(),
-            twitch_permissions
-                .clone()
-                .expect("twitch permissions initialized when twitch is enabled"),
-        );
-        new_messaging_manager.register(adapter).await;
+        if let Some(perms) = twitch_permissions.clone() {
+            let adapter = spacebot::messaging::twitch::TwitchAdapter::new(
+                &twitch_config.username,
+                &twitch_config.oauth_token,
+                twitch_config.channels.clone(),
+                twitch_config.trigger_prefix.clone(),
+                perms,
+            );
+            new_messaging_manager.register(adapter).await;
+        } else {
+            tracing::warn!("twitch enabled but permissions were not initialized");
+        }
     }
 
     let webchat_adapter = Arc::new(spacebot::messaging::webchat::WebChatAdapter::new());
