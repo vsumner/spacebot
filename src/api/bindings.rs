@@ -338,7 +338,7 @@ pub(super) async fn create_binding(
     }
     bindings_array.push(binding_table);
 
-    let new_config = write_validated_config(&config_path, doc.to_string()).await?;
+    let new_config = write_validated_config(&state, &config_path, doc.to_string()).await?;
 
     tracing::info!(
         agent_id = %request.agent_id,
@@ -620,7 +620,7 @@ pub(super) async fn update_binding(
         binding.remove("dm_allowed_users");
     }
 
-    let new_config = write_validated_config(&config_path, doc.to_string()).await?;
+    let new_config = write_validated_config(&state, &config_path, doc.to_string()).await?;
 
     tracing::info!(
         agent_id = %request.agent_id,
@@ -710,7 +710,7 @@ pub(super) async fn delete_binding(
 
     bindings_array.remove(idx);
 
-    let new_config = write_validated_config(&config_path, doc.to_string()).await?;
+    let new_config = write_validated_config(&state, &config_path, doc.to_string()).await?;
 
     tracing::info!(
         agent_id = %request.agent_id,

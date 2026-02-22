@@ -266,7 +266,7 @@ pub(super) async fn create_agent(
     new_table["id"] = toml_edit::value(&agent_id);
     agents_array.push(new_table);
 
-    let new_config = write_validated_config(&config_path, doc.to_string()).await?;
+    let new_config = write_validated_config(&state, &config_path, doc.to_string()).await?;
     reload_all_runtime_configs(&state, &new_config).await;
 
     let agent_config = new_config
@@ -591,7 +591,7 @@ pub(super) async fn delete_agent(
             }
         }
 
-        let new_config = write_validated_config(&config_path, doc.to_string()).await?;
+        let new_config = write_validated_config(&state, &config_path, doc.to_string()).await?;
         new_config_snapshot = Some(new_config);
     }
 
@@ -1009,4 +1009,110 @@ pub(super) async fn update_identity(
         identity: updated.identity,
         user: updated.user,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DeleteAgentQuery, delete_agent};
+    use crate::api::state::{AgentInfo, ApiState};
+    use crate::config::Config;
+    use axum::extract::{Query, State};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    const CONFIG_WITH_TWO_AGENTS: &str = r#"
+[llm]
+anthropic_key = "test-anthropic-key"
+
+[defaults.routing]
+channel = "anthropic/claude-sonnet-4"
+branch = "anthropic/claude-sonnet-4"
+worker = "anthropic/claude-sonnet-4"
+compactor = "anthropic/claude-sonnet-4"
+cortex = "anthropic/claude-sonnet-4"
+
+[[agents]]
+id = "main"
+default = true
+
+[[agents]]
+id = "secondary"
+default = false
+"#;
+
+    fn new_test_state() -> Arc<ApiState> {
+        let (provider_setup_tx, _) = tokio::sync::mpsc::channel(8);
+        let (agent_tx, _) = tokio::sync::mpsc::channel(8);
+        let (agent_remove_tx, _) = tokio::sync::mpsc::channel(8);
+        Arc::new(ApiState::new_with_provider_sender(
+            provider_setup_tx,
+            agent_tx,
+            agent_remove_tx,
+        ))
+    }
+
+    #[tokio::test]
+    async fn delete_agent_removes_agent_from_config_and_api_state() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let config_path = temp_dir.path().join("config.toml");
+        tokio::fs::write(&config_path, CONFIG_WITH_TWO_AGENTS)
+            .await
+            .expect("config.toml should be written");
+
+        let state = new_test_state();
+        state.set_config_path(config_path.clone()).await;
+        state.set_agent_configs(vec![
+            AgentInfo {
+                id: "main".to_string(),
+                workspace: PathBuf::from("/tmp/main"),
+                context_window: 128_000,
+                max_turns: 5,
+                max_concurrent_branches: 5,
+                max_concurrent_workers: 5,
+            },
+            AgentInfo {
+                id: "secondary".to_string(),
+                workspace: PathBuf::from("/tmp/secondary"),
+                context_window: 128_000,
+                max_turns: 5,
+                max_concurrent_branches: 5,
+                max_concurrent_workers: 5,
+            },
+        ]);
+
+        let response = delete_agent(
+            State(state.clone()),
+            Query(DeleteAgentQuery {
+                agent_id: "secondary".to_string(),
+            }),
+        )
+        .await
+        .expect("delete_agent should succeed")
+        .0;
+
+        assert_eq!(response["success"], true);
+        assert!(
+            response["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("secondary"))
+        );
+
+        let persisted_config =
+            Config::load_from_path(&config_path).expect("config after deletion should parse");
+        assert!(
+            persisted_config
+                .agents
+                .iter()
+                .any(|agent| agent.id == "main")
+        );
+        assert!(
+            !persisted_config
+                .agents
+                .iter()
+                .any(|agent| agent.id == "secondary")
+        );
+
+        let live_agents = state.agent_configs.load();
+        assert!(live_agents.iter().all(|agent| agent.id != "secondary"));
+    }
 }

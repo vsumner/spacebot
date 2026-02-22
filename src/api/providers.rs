@@ -446,7 +446,7 @@ pub(super) async fn update_provider(
         }
     }
 
-    let new_config = write_validated_config(&config_path, doc.to_string()).await?;
+    let new_config = write_validated_config(&state, &config_path, doc.to_string()).await?;
     reload_all_runtime_configs(&state, &new_config).await;
 
     state
@@ -579,7 +579,7 @@ pub(super) async fn delete_provider(
         table.remove(key_name);
     }
 
-    let new_config = write_validated_config(&config_path, doc.to_string()).await?;
+    let new_config = write_validated_config(&state, &config_path, doc.to_string()).await?;
     reload_all_runtime_configs(&state, &new_config).await;
 
     Ok(Json(ProviderUpdateResponse {

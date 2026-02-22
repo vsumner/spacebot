@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{RwLock, broadcast, mpsc};
+use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 /// Summary of an agent's configuration, exposed via the API.
 #[derive(Debug, Clone, Serialize)]
@@ -57,6 +57,8 @@ pub struct ApiState {
     pub agent_workspaces: arc_swap::ArcSwap<HashMap<String, PathBuf>>,
     /// Path to the instance config.toml file.
     pub config_path: RwLock<PathBuf>,
+    /// Serialize config.toml mutations across API endpoints.
+    pub config_write_lock: Mutex<()>,
     /// Per-agent cron stores for cron job CRUD operations.
     pub cron_stores: arc_swap::ArcSwap<HashMap<String, Arc<CronStore>>>,
     /// Per-agent cron schedulers for job timer management.
@@ -193,6 +195,7 @@ impl ApiState {
             cortex_chat_sessions: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             agent_workspaces: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             config_path: RwLock::new(PathBuf::new()),
+            config_write_lock: Mutex::new(()),
             cron_stores: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             cron_schedulers: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             runtime_configs: ArcSwap::from_pointee(HashMap::new()),

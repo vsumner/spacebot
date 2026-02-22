@@ -332,7 +332,7 @@ pub(super) async fn update_global_settings(
         }
     }
 
-    let new_config = write_validated_config(&config_path, doc.to_string()).await?;
+    let new_config = write_validated_config(&state, &config_path, doc.to_string()).await?;
     reload_all_runtime_configs(&state, &new_config).await;
 
     let message = if requires_restart {
@@ -414,7 +414,7 @@ pub(super) async fn update_raw_config(
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
 
-    let new_config = match write_validated_config(&config_path, request.content).await {
+    let new_config = match write_validated_config(&state, &config_path, request.content).await {
         Ok(config) => config,
         Err(StatusCode::BAD_REQUEST) => {
             return Ok(Json(RawConfigUpdateResponse {

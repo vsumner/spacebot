@@ -1,6 +1,6 @@
 //! API handlers for MCP server management.
 //!
-//! CRUD endpoints for `[[mcp_servers]]` in config.toml, plus per-agent
+//! CRUD endpoints for `[[defaults.mcp]]` in config.toml, plus per-agent
 //! connection status.
 
 use super::config::{reload_all_runtime_configs, write_validated_config};
@@ -76,7 +76,11 @@ pub(super) async fn list_mcp_servers(
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         let mut defs = Vec::new();
-        if let Some(arr) = doc.get("mcp_servers").and_then(|v| v.as_array_of_tables()) {
+        if let Some(arr) = doc
+            .get("defaults")
+            .and_then(|defaults| defaults.get("mcp"))
+            .and_then(|mcp| mcp.as_array_of_tables())
+        {
             for table in arr.iter() {
                 let name = table
                     .get("name")
@@ -138,7 +142,11 @@ pub(super) async fn create_mcp_server(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Check for duplicates
-    if let Some(arr) = doc.get("mcp_servers").and_then(|v| v.as_array_of_tables()) {
+    if let Some(arr) = doc
+        .get("defaults")
+        .and_then(|defaults| defaults.get("mcp"))
+        .and_then(|mcp| mcp.as_array_of_tables())
+    {
         for table in arr.iter() {
             if table.get("name").and_then(|v| v.as_str()) == Some(&request.name) {
                 return Ok(Json(MutationResponse {
@@ -186,21 +194,22 @@ pub(super) async fn create_mcp_server(
         new_table["headers"] = toml_edit::value(headers_table);
     }
 
-    // Append to [[mcp_servers]] array
-    if doc.get("mcp_servers").is_none() {
-        doc.insert(
-            "mcp_servers",
-            toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()),
-        );
+    // Append to [[defaults.mcp]] array
+    if doc.get("defaults").is_none() {
+        doc["defaults"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    if doc["defaults"].get("mcp").is_none() {
+        doc["defaults"]["mcp"] = toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new());
     }
     if let Some(arr) = doc
-        .get_mut("mcp_servers")
+        .get_mut("defaults")
+        .and_then(|defaults| defaults.get_mut("mcp"))
         .and_then(|v| v.as_array_of_tables_mut())
     {
         arr.push(new_table);
     }
 
-    let new_config = write_validated_config(&config_path, doc.to_string()).await?;
+    let new_config = write_validated_config(&state, &config_path, doc.to_string()).await?;
     reload_all_runtime_configs(&state, &new_config).await;
 
     Ok(Json(MutationResponse {
@@ -230,7 +239,8 @@ pub(super) async fn update_mcp_server(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let Some(arr) = doc
-        .get_mut("mcp_servers")
+        .get_mut("defaults")
+        .and_then(|defaults| defaults.get_mut("mcp"))
         .and_then(|v| v.as_array_of_tables_mut())
     else {
         return Ok(Json(MutationResponse {
@@ -279,7 +289,7 @@ pub(super) async fn update_mcp_server(
         }));
     }
 
-    let new_config = write_validated_config(&config_path, doc.to_string()).await?;
+    let new_config = write_validated_config(&state, &config_path, doc.to_string()).await?;
     reload_all_runtime_configs(&state, &new_config).await;
 
     Ok(Json(MutationResponse {
@@ -309,7 +319,8 @@ pub(super) async fn delete_mcp_server(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let Some(arr) = doc
-        .get_mut("mcp_servers")
+        .get_mut("defaults")
+        .and_then(|defaults| defaults.get_mut("mcp"))
         .and_then(|v| v.as_array_of_tables_mut())
     else {
         return Ok(Json(MutationResponse {
@@ -340,7 +351,7 @@ pub(super) async fn delete_mcp_server(
         }));
     }
 
-    let new_config = write_validated_config(&config_path, doc.to_string()).await?;
+    let new_config = write_validated_config(&state, &config_path, doc.to_string()).await?;
     reload_all_runtime_configs(&state, &new_config).await;
 
     Ok(Json(MutationResponse {
@@ -423,4 +434,129 @@ async fn get_server_state(state: &ApiState, server_name: &str) -> String {
         }
     }
     "not_connected".into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CreateMcpServerRequest, create_mcp_server, delete_mcp_server};
+    use crate::api::state::ApiState;
+    use crate::config::{Config, RuntimeConfig};
+    use axum::Json;
+    use axum::extract::{Path, State};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    const VALID_BASE_CONFIG: &str = r#"
+[llm]
+anthropic_key = "test-anthropic-key"
+
+[defaults.routing]
+channel = "anthropic/claude-sonnet-4"
+branch = "anthropic/claude-sonnet-4"
+worker = "anthropic/claude-sonnet-4"
+compactor = "anthropic/claude-sonnet-4"
+cortex = "anthropic/claude-sonnet-4"
+
+[[agents]]
+id = "main"
+default = true
+"#;
+
+    fn new_test_state() -> Arc<ApiState> {
+        let (provider_setup_tx, _) = tokio::sync::mpsc::channel(8);
+        let (agent_tx, _) = tokio::sync::mpsc::channel(8);
+        let (agent_remove_tx, _) = tokio::sync::mpsc::channel(8);
+        Arc::new(ApiState::new_with_provider_sender(
+            provider_setup_tx,
+            agent_tx,
+            agent_remove_tx,
+        ))
+    }
+
+    async fn configure_runtime_for_main(
+        state: &Arc<ApiState>,
+        config_path: &std::path::Path,
+    ) -> Arc<RuntimeConfig> {
+        let config = Config::load_from_path(config_path).expect("config should load for test");
+        let resolved_agent = config
+            .resolve_agents()
+            .into_iter()
+            .find(|agent| agent.id == "main")
+            .expect("main agent should exist in resolved config");
+        let runtime_config = Arc::new(RuntimeConfig::new(
+            &config.instance_dir,
+            &resolved_agent,
+            &config.defaults,
+            crate::prompts::PromptEngine::new("en").expect("prompt engine should build"),
+            crate::identity::Identity::default(),
+            crate::skills::SkillSet::default(),
+        ));
+
+        let mut runtime_configs = HashMap::new();
+        runtime_configs.insert("main".to_string(), runtime_config.clone());
+        state.set_runtime_configs(runtime_configs);
+
+        let mut mcp_managers = HashMap::new();
+        mcp_managers.insert(
+            "main".to_string(),
+            Arc::new(crate::mcp::McpManager::new(resolved_agent.mcp.clone())),
+        );
+        state.set_mcp_managers(mcp_managers);
+
+        runtime_config
+    }
+
+    #[tokio::test]
+    async fn create_and_delete_mcp_server_persist_and_reload_runtime_config() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let config_path = temp_dir.path().join("config.toml");
+        tokio::fs::write(&config_path, VALID_BASE_CONFIG)
+            .await
+            .expect("config.toml should be written");
+
+        let state = new_test_state();
+        state.set_config_path(config_path.clone()).await;
+        let runtime_config = configure_runtime_for_main(&state, &config_path).await;
+
+        let create_response = create_mcp_server(
+            State(state.clone()),
+            Json(CreateMcpServerRequest {
+                name: "test-server".to_string(),
+                transport: "stdio".to_string(),
+                enabled: true,
+                command: Some("echo".to_string()),
+                args: vec!["hello".to_string()],
+                env: HashMap::new(),
+                url: None,
+                headers: HashMap::new(),
+            }),
+        )
+        .await
+        .expect("create_mcp_server should succeed")
+        .0;
+
+        assert!(create_response.success);
+
+        let persisted_after_create =
+            Config::load_from_path(&config_path).expect("created config should parse");
+        assert_eq!(persisted_after_create.defaults.mcp.len(), 1);
+        assert_eq!(persisted_after_create.defaults.mcp[0].name, "test-server");
+
+        let runtime_mcp_after_create = runtime_config.mcp.load();
+        assert_eq!(runtime_mcp_after_create.len(), 1);
+        assert_eq!(runtime_mcp_after_create[0].name, "test-server");
+
+        let delete_response = delete_mcp_server(State(state), Path("test-server".to_string()))
+            .await
+            .expect("delete_mcp_server should succeed")
+            .0;
+        assert!(delete_response.success);
+
+        let persisted_after_delete =
+            Config::load_from_path(&config_path).expect("deleted config should parse");
+        assert!(persisted_after_delete.defaults.mcp.is_empty());
+
+        let runtime_mcp_after_delete = runtime_config.mcp.load();
+        assert!(runtime_mcp_after_delete.is_empty());
+    }
 }
