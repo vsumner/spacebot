@@ -1086,6 +1086,9 @@ struct TomlConfig {
     llm: TomlLlmConfig,
     #[serde(default)]
     defaults: TomlDefaultsConfig,
+    /// Legacy top-level MCP server table. Canonical location is `defaults.mcp`.
+    #[serde(default)]
+    mcp_servers: Vec<TomlMcpServerConfig>,
     #[serde(default)]
     agents: Vec<TomlAgentConfig>,
     #[serde(default)]
@@ -1640,6 +1643,23 @@ fn parse_mcp_server_config(raw: TomlMcpServerConfig) -> Result<McpServerConfig> 
         transport,
         enabled: raw.enabled,
     })
+}
+
+fn merge_defaults_mcp(
+    canonical: Vec<McpServerConfig>,
+    legacy: Vec<McpServerConfig>,
+) -> Vec<McpServerConfig> {
+    let mut merged = canonical;
+    for legacy_config in legacy {
+        if merged
+            .iter()
+            .any(|existing| existing.name == legacy_config.name)
+        {
+            continue;
+        }
+        merged.push(legacy_config);
+    }
+    merged
 }
 
 /// Resolve a TomlRoutingConfig against a base RoutingConfig.
@@ -2278,12 +2298,24 @@ impl Config {
         // Note: We allow boot without provider keys now. System starts in setup mode.
         // Agents are initialized later when keys are added via API.
 
-        let default_mcp = toml
+        let canonical_default_mcp = toml
             .defaults
             .mcp
             .into_iter()
             .map(parse_mcp_server_config)
             .collect::<Result<Vec<_>>>()?;
+        let legacy_default_mcp = toml
+            .mcp_servers
+            .into_iter()
+            .map(parse_mcp_server_config)
+            .collect::<Result<Vec<_>>>()?;
+        if !legacy_default_mcp.is_empty() {
+            tracing::warn!(
+                count = legacy_default_mcp.len(),
+                "config uses deprecated [[mcp_servers]] table; migrate entries to [[defaults.mcp]]"
+            );
+        }
+        let default_mcp = merge_defaults_mcp(canonical_default_mcp, legacy_default_mcp);
 
         let base_defaults = DefaultsConfig::default();
         let defaults = DefaultsConfig {
@@ -3904,6 +3936,61 @@ name = "Custom OpenAI"
         assert_eq!(openai_provider.api_key, "explicit-openai-key");
         assert_eq!(openai_provider.name.as_deref(), Some("Custom OpenAI"));
         assert_eq!(config.llm.openai_key.as_deref(), Some("legacy-openai-key"));
+    }
+
+    #[test]
+    fn test_legacy_mcp_servers_table_migrates_into_defaults_mcp() {
+        let toml = r#"
+[[defaults.mcp]]
+name = "canonical"
+transport = "stdio"
+command = "canonical-cmd"
+args = ["--canonical"]
+
+[[mcp_servers]]
+name = "legacy"
+transport = "stdio"
+command = "legacy-cmd"
+args = ["--legacy"]
+
+[[mcp_servers]]
+name = "canonical"
+transport = "stdio"
+command = "legacy-override"
+args = ["--legacy-override"]
+"#;
+
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+
+        assert_eq!(config.defaults.mcp.len(), 2);
+        let canonical = config
+            .defaults
+            .mcp
+            .iter()
+            .find(|server| server.name == "canonical")
+            .expect("canonical mcp server should exist");
+        match &canonical.transport {
+            McpTransport::Stdio { command, args, .. } => {
+                assert_eq!(command, "canonical-cmd");
+                assert_eq!(args, &vec!["--canonical".to_string()]);
+            }
+            McpTransport::Http { .. } => panic!("expected stdio transport"),
+        }
+
+        let legacy = config
+            .defaults
+            .mcp
+            .iter()
+            .find(|server| server.name == "legacy")
+            .expect("legacy mcp server should be merged into defaults.mcp");
+        match &legacy.transport {
+            McpTransport::Stdio { command, args, .. } => {
+                assert_eq!(command, "legacy-cmd");
+                assert_eq!(args, &vec!["--legacy".to_string()]);
+            }
+            McpTransport::Http { .. } => panic!("expected stdio transport"),
+        }
     }
 
     #[test]

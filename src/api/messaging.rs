@@ -225,7 +225,7 @@ pub(super) async fn disconnect_platform(
         }
     }
 
-    let new_config = write_validated_config(&config_path, doc.to_string()).await?;
+    let new_config = write_validated_config(&state, &config_path, doc.to_string()).await?;
     sync_bindings_and_permissions(&state, &new_config).await;
     reload_all_runtime_configs(&state, &new_config).await;
 
@@ -279,7 +279,7 @@ pub(super) async fn toggle_platform(
 
     table["enabled"] = toml_edit::value(request.enabled);
 
-    let new_config = write_validated_config(&config_path, doc.to_string()).await?;
+    let new_config = write_validated_config(&state, &config_path, doc.to_string()).await?;
     sync_bindings_and_permissions(&state, &new_config).await;
     reload_all_runtime_configs(&state, &new_config).await;
 

@@ -1,4 +1,4 @@
-use super::state::ApiState;
+use super::state::{ApiEvent, ApiState};
 
 use axum::Json;
 use axum::extract::{Query, State};
@@ -10,18 +10,58 @@ use std::sync::Arc;
 ///
 /// Returns the fully parsed `Config` snapshot that was persisted.
 pub(super) async fn write_validated_config(
+    state: &Arc<ApiState>,
     config_path: &std::path::Path,
     updated_content: String,
 ) -> Result<crate::config::Config, StatusCode> {
+    let _config_write_guard = state.config_write_lock.lock().await;
+
     if let Err(error) = crate::config::Config::validate_toml(&updated_content) {
         tracing::warn!(%error, "config update validation failed");
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    tokio::fs::write(config_path, updated_content)
+    let parent_dir = config_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let file_name = config_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config.toml");
+    let temp_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let temp_path = parent_dir.join(format!(
+        ".{file_name}.tmp.{}.{}",
+        std::process::id(),
+        temp_suffix
+    ));
+
+    tokio::fs::write(&temp_path, updated_content)
         .await
         .map_err(|error| {
-            tracing::warn!(%error, "failed to write config.toml");
+            tracing::warn!(%error, path = %temp_path.display(), "failed to write temp config file");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    tokio::fs::rename(&temp_path, config_path)
+        .await
+        .map_err(|error| {
+            let cleanup_result = std::fs::remove_file(&temp_path);
+            if let Err(cleanup_error) = cleanup_result {
+                tracing::debug!(
+                    %cleanup_error,
+                    path = %temp_path.display(),
+                    "failed to clean up temp config file after rename error"
+                );
+            }
+            tracing::warn!(
+                %error,
+                from = %temp_path.display(),
+                to = %config_path.display(),
+                "failed to atomically replace config.toml"
+            );
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
@@ -36,6 +76,14 @@ pub(super) async fn reload_all_runtime_configs(
     state: &Arc<ApiState>,
     new_config: &crate::config::Config,
 ) {
+    let llm_manager_guard = state.llm_manager.read().await;
+    if let Some(llm_manager) = llm_manager_guard.as_ref() {
+        llm_manager.reload_config(new_config.llm.clone());
+    }
+    drop(llm_manager_guard);
+
+    state.set_defaults_config(new_config.defaults.clone()).await;
+
     let runtime_configs = state.runtime_configs.load();
     let mcp_managers = state.mcp_managers.load();
     let reload_targets = runtime_configs
@@ -58,6 +106,8 @@ pub(super) async fn reload_all_runtime_configs(
             .reload_config(new_config, &agent_id, &mcp_manager)
             .await;
     }
+
+    state.send_event(ApiEvent::ConfigReloaded);
 }
 
 /// Sync bindings and messaging permission snapshots from a parsed config snapshot.
@@ -410,7 +460,7 @@ pub(super) async fn update_agent_config(
         update_discord_table(&mut doc, discord)?;
     }
 
-    let new_config = write_validated_config(&config_path, doc.to_string()).await?;
+    let new_config = write_validated_config(&state, &config_path, doc.to_string()).await?;
     tracing::info!(agent_id = %request.agent_id, "config.toml updated via API");
 
     let runtime_configs = state.runtime_configs.load();
@@ -432,6 +482,8 @@ pub(super) async fn update_agent_config(
             arc_swap.store(std::sync::Arc::new(new_perms));
         }
     }
+
+    state.send_event(ApiEvent::ConfigReloaded);
 
     get_agent_config(
         State(state),

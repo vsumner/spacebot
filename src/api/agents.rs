@@ -1,3 +1,4 @@
+use super::config::{reload_all_runtime_configs, write_validated_config};
 use super::state::{AgentInfo, ApiState};
 
 use crate::agent::cortex::CortexLogger;
@@ -265,41 +266,20 @@ pub(super) async fn create_agent(
     new_table["id"] = toml_edit::value(&agent_id);
     agents_array.push(new_table);
 
-    tokio::fs::write(&config_path, doc.to_string())
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, "failed to write config.toml");
+    let new_config = write_validated_config(&state, &config_path, doc.to_string()).await?;
+    reload_all_runtime_configs(&state, &new_config).await;
+
+    let agent_config = new_config
+        .resolve_agents()
+        .into_iter()
+        .find(|resolved| resolved.id == agent_id)
+        .ok_or_else(|| {
+            tracing::error!(
+                agent_id = %agent_id,
+                "newly created agent missing from resolved config"
+            );
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-
-    let defaults = state.defaults_config.read().await;
-    let defaults = defaults.as_ref().ok_or_else(|| {
-        tracing::error!("defaults config not available");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    let raw_config = crate::config::AgentConfig {
-        id: agent_id.clone(),
-        default: false,
-        workspace: None,
-        routing: None,
-        max_concurrent_branches: None,
-        max_concurrent_workers: None,
-        max_turns: None,
-        branch_max_turns: None,
-        context_window: None,
-        compaction: None,
-        memory_persistence: None,
-        coalesce: None,
-        ingestion: None,
-        cortex: None,
-        browser: None,
-        mcp: None,
-        brave_search_key: None,
-        cron: Vec::new(),
-    };
-    let agent_config = raw_config.resolve(&instance_dir, defaults);
-    let _ = defaults;
 
     for dir in [
         &agent_config.workspace,
@@ -384,16 +364,7 @@ pub(super) async fn create_agent(
             .clone()
     };
 
-    let defaults_for_runtime = {
-        let guard = state.defaults_config.read().await;
-        guard
-            .as_ref()
-            .ok_or_else(|| {
-                tracing::error!("defaults config not available");
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?
-            .clone()
-    };
+    let defaults_for_runtime = new_config.defaults.clone();
 
     let runtime_config = std::sync::Arc::new(crate::config::RuntimeConfig::new(
         &instance_dir,
@@ -588,6 +559,7 @@ pub(super) async fn delete_agent(
 
     // Remove the [[agents]] entry from config.toml
     let config_path = state.config_path.read().await.clone();
+    let mut new_config_snapshot: Option<crate::config::Config> = None;
     if config_path.exists() {
         let content = tokio::fs::read_to_string(&config_path)
             .await
@@ -619,12 +591,8 @@ pub(super) async fn delete_agent(
             }
         }
 
-        tokio::fs::write(&config_path, doc.to_string())
-            .await
-            .map_err(|error| {
-                tracing::warn!(%error, "failed to write config.toml");
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
+        let new_config = write_validated_config(&state, &config_path, doc.to_string()).await?;
+        new_config_snapshot = Some(new_config);
     }
 
     // Close the SQLite pool before removing state
@@ -680,6 +648,10 @@ pub(super) async fn delete_agent(
         state
             .cortex_chat_sessions
             .store(std::sync::Arc::new(sessions));
+    }
+
+    if let Some(new_config) = new_config_snapshot.as_ref() {
+        reload_all_runtime_configs(&state, new_config).await;
     }
 
     // Signal the main event loop to remove the agent
@@ -1037,4 +1009,110 @@ pub(super) async fn update_identity(
         identity: updated.identity,
         user: updated.user,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DeleteAgentQuery, delete_agent};
+    use crate::api::state::{AgentInfo, ApiState};
+    use crate::config::Config;
+    use axum::extract::{Query, State};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    const CONFIG_WITH_TWO_AGENTS: &str = r#"
+[llm]
+anthropic_key = "test-anthropic-key"
+
+[defaults.routing]
+channel = "anthropic/claude-sonnet-4"
+branch = "anthropic/claude-sonnet-4"
+worker = "anthropic/claude-sonnet-4"
+compactor = "anthropic/claude-sonnet-4"
+cortex = "anthropic/claude-sonnet-4"
+
+[[agents]]
+id = "main"
+default = true
+
+[[agents]]
+id = "secondary"
+default = false
+"#;
+
+    fn new_test_state() -> Arc<ApiState> {
+        let (provider_setup_tx, _) = tokio::sync::mpsc::channel(8);
+        let (agent_tx, _) = tokio::sync::mpsc::channel(8);
+        let (agent_remove_tx, _) = tokio::sync::mpsc::channel(8);
+        Arc::new(ApiState::new_with_provider_sender(
+            provider_setup_tx,
+            agent_tx,
+            agent_remove_tx,
+        ))
+    }
+
+    #[tokio::test]
+    async fn delete_agent_removes_agent_from_config_and_api_state() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let config_path = temp_dir.path().join("config.toml");
+        tokio::fs::write(&config_path, CONFIG_WITH_TWO_AGENTS)
+            .await
+            .expect("config.toml should be written");
+
+        let state = new_test_state();
+        state.set_config_path(config_path.clone()).await;
+        state.set_agent_configs(vec![
+            AgentInfo {
+                id: "main".to_string(),
+                workspace: PathBuf::from("/tmp/main"),
+                context_window: 128_000,
+                max_turns: 5,
+                max_concurrent_branches: 5,
+                max_concurrent_workers: 5,
+            },
+            AgentInfo {
+                id: "secondary".to_string(),
+                workspace: PathBuf::from("/tmp/secondary"),
+                context_window: 128_000,
+                max_turns: 5,
+                max_concurrent_branches: 5,
+                max_concurrent_workers: 5,
+            },
+        ]);
+
+        let response = delete_agent(
+            State(state.clone()),
+            Query(DeleteAgentQuery {
+                agent_id: "secondary".to_string(),
+            }),
+        )
+        .await
+        .expect("delete_agent should succeed")
+        .0;
+
+        assert_eq!(response["success"], true);
+        assert!(
+            response["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("secondary"))
+        );
+
+        let persisted_config =
+            Config::load_from_path(&config_path).expect("config after deletion should parse");
+        assert!(
+            persisted_config
+                .agents
+                .iter()
+                .any(|agent| agent.id == "main")
+        );
+        assert!(
+            !persisted_config
+                .agents
+                .iter()
+                .any(|agent| agent.id == "secondary")
+        );
+
+        let live_agents = state.agent_configs.load();
+        assert!(live_agents.iter().all(|agent| agent.id != "secondary"));
+    }
 }
