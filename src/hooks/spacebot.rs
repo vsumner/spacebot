@@ -465,6 +465,7 @@ where
         _internal_call_id: &str,
         args: &str,
     ) -> ToolCallHookAction {
+
         self.saw_tool_call
             .store(true, std::sync::atomic::Ordering::Relaxed);
 
@@ -524,10 +525,9 @@ where
             return guard_action;
         }
 
-        // Belt-and-suspenders check specifically for `reply` tool results on
-        // channels. `guard_tool_result` already terminates channels on any tool
-        // leak, but this catches any edge case where the reply content itself
-        // has a different leak than the raw tool output.
+        // Only enforce hard-stop leak blocking on channel egress (`reply`).
+        // Worker and branch tool outputs are internal and should not terminate
+        // long-running jobs.
         if self.process_type == ProcessType::Channel
             && tool_name == "reply"
             && let Some(leak) = self.scan_for_leaks(result)
