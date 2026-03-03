@@ -183,7 +183,6 @@ impl StatusBlock {
             false
         }
     }
-
     /// Render the status block as a string for context injection.
     pub fn render(&self) -> String {
         self.render_with_time_context(None)

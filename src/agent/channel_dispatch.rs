@@ -598,7 +598,6 @@ where
             .active_workers
             .with_label_values(&[&*agent_id])
             .inc();
-
         let outcome = std::panic::AssertUnwindSafe(future).catch_unwind().await;
         let worker_result: std::result::Result<String, WorkerCompletionError> = match outcome {
             Ok(Ok(text)) => {
