@@ -22,7 +22,7 @@ use crate::{
     ProcessType, WorkerId,
 };
 use rig::agent::AgentBuilder;
-use rig::completion::CompletionModel;
+use rig::completion::{CompletionModel, Prompt};
 use rig::message::UserContent;
 use rig::one_or_many::OneOrMany;
 use rig::tool::server::ToolServer;
@@ -48,6 +48,29 @@ struct PendingResult {
     result: String,
     /// Whether the process completed successfully.
     success: bool,
+}
+
+const EVENT_LAG_WARNING_INTERVAL_SECS: u64 = 30;
+
+async fn recv_channel_event(
+    event_rx: &mut broadcast::Receiver<ProcessEvent>,
+) -> crate::BroadcastRecvResult<ProcessEvent> {
+    crate::classify_broadcast_recv_result(event_rx.recv().await)
+}
+
+fn should_process_event_for_channel(event: &ProcessEvent, channel_id: &ChannelId) -> bool {
+    event_is_for_channel(event, channel_id)
+}
+
+fn should_flush_coalesce_buffer_for_event(event: &ProcessEvent) -> bool {
+    matches!(
+        event,
+        ProcessEvent::BranchStarted { .. }
+            | ProcessEvent::BranchResult { .. }
+            | ProcessEvent::WorkerStarted { .. }
+            | ProcessEvent::WorkerStatus { .. }
+            | ProcessEvent::WorkerComplete { .. }
+    )
 }
 
 /// Shared state that channel tools need to act on the channel.
@@ -307,6 +330,8 @@ impl Channel {
     /// Run the channel event loop.
     pub async fn run(mut self) -> Result<()> {
         tracing::info!(channel_id = %self.id, "channel started");
+        let mut lagged_events_since_warning: u64 = 0;
+        let mut last_lag_warning: Option<std::time::Instant> = None;
 
         loop {
             // Compute next deadline from coalesce and retrigger timers
@@ -343,27 +368,51 @@ impl Channel {
                         }
                     }
                 }
-                event = self.event_rx.recv() => {
+                event = recv_channel_event(&mut self.event_rx) => {
                     match event {
-                        Ok(event) => {
-                            // Events bypass coalescing - flush buffer first if needed
-                            if let Err(error) = self.flush_coalesce_buffer().await {
-                                tracing::error!(%error, channel_id = %self.id, "error flushing coalesce buffer");
+                        crate::BroadcastRecvResult::Event(event) => {
+                            if !should_process_event_for_channel(&event, &self.id) {
+                                continue;
+                            }
+                            // Worker/branch lifecycle events bypass coalescing.
+                            if should_flush_coalesce_buffer_for_event(&event)
+                                && let Err(error) = self.flush_coalesce_buffer().await
+                            {
+                                tracing::error!(
+                                    %error,
+                                    channel_id = %self.id,
+                                    "error flushing coalesce buffer"
+                                );
                             }
                             if let Err(error) = self.handle_event(event).await {
                                 tracing::error!(%error, channel_id = %self.id, "error handling event");
                             }
                         }
-                        Err(error) => {
-                            match super::classify_event_recv_error(&error) {
-                                super::EventRecvDisposition::Continue { .. } => {
-                                    tracing::debug!(channel_id = %self.id, %error, "event receiver lagged, continuing channel loop");
-                                }
-                                super::EventRecvDisposition::Stop => {
-                                    tracing::info!(channel_id = %self.id, %error, "event receiver closed, stopping channel loop");
-                                    break;
-                                }
+                        crate::BroadcastRecvResult::Lagged(skipped) => {
+                            #[cfg(feature = "metrics")]
+                            crate::telemetry::Metrics::global()
+                                .event_receiver_lagged_events_total
+                                .with_label_values(&[&*self.deps.agent_id, "channel_control"])
+                                .inc_by(skipped);
+
+                            if let Some(skipped) = crate::drain_lag_warning_count(
+                                &mut lagged_events_since_warning,
+                                &mut last_lag_warning,
+                                skipped,
+                                std::time::Duration::from_secs(
+                                    EVENT_LAG_WARNING_INTERVAL_SECS,
+                                ),
+                            ) {
+                                tracing::warn!(
+                                    channel_id = %self.id,
+                                    skipped,
+                                    "channel event receiver lagged, dropping old events"
+                                );
                             }
+                        }
+                        crate::BroadcastRecvResult::Closed => {
+                            tracing::info!(channel_id = %self.id, "channel event bus closed, stopping channel");
+                            break;
                         }
                     }
                 }
@@ -1175,7 +1224,11 @@ impl Channel {
         };
         let history_len_before = history.len();
 
-        let mut result = self.hook.prompt_once(&agent, &mut history, user_text).await;
+        let mut result = agent
+            .prompt(user_text)
+            .with_history(&mut history)
+            .with_hook(self.hook.clone())
+            .await;
 
         // If the LLM responded with text that looks like tool call syntax, it failed
         // to use the tool calling API. Inject a correction and retry a couple
@@ -1198,9 +1251,10 @@ impl Channel {
 
             let prompt_engine = self.deps.runtime_config.prompts.load();
             let correction = prompt_engine.render_system_tool_syntax_correction()?;
-            result = self
-                .hook
-                .prompt_once(&agent, &mut history, &correction)
+            result = agent
+                .prompt(&correction)
+                .with_history(&mut history)
+                .with_hook(self.hook.clone())
                 .await;
         }
 
@@ -1450,11 +1504,6 @@ impl Channel {
 
     /// Handle a process event (branch results, worker completions, status updates).
     async fn handle_event(&mut self, event: ProcessEvent) -> Result<()> {
-        // Only process events targeted at this channel
-        if !event_is_for_channel(&event, &self.id) {
-            return Ok(());
-        }
-
         // Update status block
         {
             let mut status = self.state.status_block.write().await;
@@ -1820,5 +1869,106 @@ impl Channel {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{recv_channel_event, should_process_event_for_channel};
+    use crate::memory::MemoryType;
+    use crate::{AgentId, ChannelId, ProcessEvent, ProcessId};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn channel_event_loop_continues_after_lagged_broadcast() {
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel::<ProcessEvent>(2);
+        let agent_id: AgentId = Arc::from("agent");
+        let channel_id: ChannelId = Arc::from("channel");
+        let process_id = ProcessId::Channel(channel_id);
+
+        for status in ["one", "two", "three"] {
+            let _ = event_tx.send(ProcessEvent::StatusUpdate {
+                agent_id: agent_id.clone(),
+                process_id: process_id.clone(),
+                status: status.to_string(),
+            });
+        }
+
+        let first = recv_channel_event(&mut event_rx).await;
+        assert!(
+            matches!(first, crate::BroadcastRecvResult::Lagged(skipped) if skipped > 0),
+            "expected lagged receive, got {first:?}"
+        );
+
+        let second = recv_channel_event(&mut event_rx).await;
+        assert!(
+            matches!(
+                second,
+                crate::BroadcastRecvResult::Event(ProcessEvent::StatusUpdate { .. })
+            ),
+            "expected next event after lagged receive, got {second:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_event_loop_stops_when_event_bus_closes() {
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel::<ProcessEvent>(2);
+        drop(event_tx);
+
+        let event = recv_channel_event(&mut event_rx).await;
+        assert!(matches!(event, crate::BroadcastRecvResult::Closed));
+    }
+
+    #[test]
+    fn channel_coalesce_ignores_unrelated_memory_saved_events() {
+        let channel_id: ChannelId = Arc::from("channel-a");
+        let event = ProcessEvent::MemorySaved {
+            agent_id: Arc::from("agent"),
+            memory_id: "memory-1".to_string(),
+            channel_id: Some(Arc::from("channel-b")),
+            memory_type: MemoryType::Fact,
+            importance: 0.8,
+            content_summary: "saved memory".to_string(),
+        };
+
+        assert!(!should_process_event_for_channel(&event, &channel_id));
+    }
+
+    #[test]
+    fn channel_coalesce_ignores_unrelated_compaction_events() {
+        let channel_id: ChannelId = Arc::from("channel-a");
+        let event = ProcessEvent::CompactionTriggered {
+            agent_id: Arc::from("agent"),
+            channel_id: Arc::from("channel-b"),
+            threshold_reached: 0.85,
+        };
+
+        assert!(!should_process_event_for_channel(&event, &channel_id));
+    }
+
+    #[test]
+    fn channel_coalesce_processes_related_worker_events() {
+        let channel_id: ChannelId = Arc::from("channel-a");
+        let event = ProcessEvent::WorkerStatus {
+            agent_id: Arc::from("agent"),
+            worker_id: uuid::Uuid::new_v4(),
+            channel_id: Some(channel_id.clone()),
+            status: "running".to_string(),
+        };
+
+        assert!(should_process_event_for_channel(&event, &channel_id));
+    }
+
+    #[test]
+    fn channel_coalesce_processes_related_branch_events() {
+        let channel_id: ChannelId = Arc::from("channel-a");
+        let event = ProcessEvent::BranchResult {
+            agent_id: Arc::from("agent"),
+            branch_id: uuid::Uuid::new_v4(),
+            channel_id: channel_id.clone(),
+            conclusion: "done".to_string(),
+        };
+
+        assert!(should_process_event_for_channel(&event, &channel_id));
     }
 }
