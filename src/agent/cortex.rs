@@ -143,7 +143,7 @@ async fn maybe_generate_bulletin_under_lock<F, Fut>(
     warmup_config: &arc_swap::ArcSwap<crate::config::WarmupConfig>,
     warmup_status: &arc_swap::ArcSwap<crate::config::WarmupStatus>,
     generate: F,
-) -> bool
+) -> BulletinRefreshOutcome
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = bool>,
@@ -155,7 +155,11 @@ where
     let refresh_secs = warmup_config.refresh_secs.max(1);
 
     if should_generate_bulletin_from_bulletin_loop(warmup_config, &status) {
-        generate().await
+        if generate().await {
+            BulletinRefreshOutcome::Generated
+        } else {
+            BulletinRefreshOutcome::Failed
+        }
     } else {
         tracing::debug!(
             warmup_enabled = warmup_config.enabled,
@@ -163,7 +167,24 @@ where
             refresh_secs,
             "skipping bulletin loop generation because warmup bulletin is fresh"
         );
-        true
+        BulletinRefreshOutcome::SkippedFresh
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BulletinRefreshOutcome {
+    Generated,
+    SkippedFresh,
+    Failed,
+}
+
+impl BulletinRefreshOutcome {
+    fn is_success(self) -> bool {
+        !matches!(self, Self::Failed)
+    }
+
+    fn generated(self) -> bool {
+        matches!(self, Self::Generated)
     }
 }
 
@@ -912,9 +933,9 @@ pub fn trigger_forced_warmup(deps: AgentDeps, dispatch_type: &'static str) {
 fn spawn_bulletin_refresh_task(
     deps: AgentDeps,
     logger: CortexLogger,
-) -> tokio::task::JoinHandle<()> {
+) -> tokio::task::JoinHandle<BulletinRefreshOutcome> {
     tokio::spawn(async move {
-        maybe_generate_bulletin_under_lock(
+        let bulletin_outcome = maybe_generate_bulletin_under_lock(
             deps.runtime_config.warmup_lock.as_ref(),
             &deps.runtime_config.warmup,
             &deps.runtime_config.warmup_status,
@@ -922,6 +943,7 @@ fn spawn_bulletin_refresh_task(
         )
         .await;
         generate_profile(&deps, &logger).await;
+        bulletin_outcome
     })
 }
 
@@ -939,7 +961,7 @@ async fn run_cortex_loop(
 
     // Run bulletin generation immediately on startup, with retries.
     for attempt in 0..=MAX_RETRIES {
-        let bulletin_ok = maybe_generate_bulletin_under_lock(
+        let bulletin_outcome = maybe_generate_bulletin_under_lock(
             cortex.deps.runtime_config.warmup_lock.as_ref(),
             &cortex.deps.runtime_config.warmup,
             &cortex.deps.runtime_config.warmup_status,
@@ -947,7 +969,7 @@ async fn run_cortex_loop(
         )
         .await;
 
-        if bulletin_ok {
+        if bulletin_outcome.is_success() {
             break;
         }
         if attempt < MAX_RETRIES {
@@ -983,10 +1005,12 @@ async fn run_cortex_loop(
     let mut tick_timer =
         tokio::time::interval_at(tokio::time::Instant::now() + tick_period, tick_period);
     tick_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut lagged_since_last_warning: u64 = 0;
-    let mut last_lag_warning: Option<Instant> = None;
+    let mut lagged_since_last_warning_control: u64 = 0;
+    let mut last_lag_warning_control: Option<Instant> = None;
+    let mut lagged_since_last_warning_memory: u64 = 0;
+    let mut last_lag_warning_memory: Option<Instant> = None;
     let mut memory_event_stream_open = true;
-    let mut refresh_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut refresh_task: Option<tokio::task::JoinHandle<BulletinRefreshOutcome>> = None;
 
     loop {
         tokio::select! {
@@ -995,8 +1019,8 @@ async fn run_cortex_loop(
                     event,
                     "control",
                     ReceiverClosedBehavior::StopLoop,
-                    &mut lagged_since_last_warning,
-                    &mut last_lag_warning,
+                    &mut lagged_since_last_warning_control,
+                    &mut last_lag_warning_control,
                     LAG_WARNING_INTERVAL_SECS,
                 ) {
                     CortexReceiverOutcome::Observe(event) => cortex.observe(event).await,
@@ -1023,8 +1047,8 @@ async fn run_cortex_loop(
                     event,
                     "memory",
                     ReceiverClosedBehavior::DisableStream,
-                    &mut lagged_since_last_warning,
-                    &mut last_lag_warning,
+                    &mut lagged_since_last_warning_memory,
+                    &mut last_lag_warning_memory,
                     LAG_WARNING_INTERVAL_SECS,
                 ) {
                     CortexReceiverOutcome::Observe(event) => cortex.observe(event).await,
@@ -1056,13 +1080,18 @@ async fn run_cortex_loop(
                 if refresh_task
                     .as_ref()
                     .is_some_and(tokio::task::JoinHandle::is_finished)
+                    && let Some(task) = refresh_task.take()
                 {
-                    if let Some(task) = refresh_task.take()
-                        && let Err(error) = task.await
-                    {
-                        tracing::warn!(%error, "cortex bulletin refresh task failed");
+                    match task.await {
+                        Ok(outcome) => {
+                            if outcome.generated() {
+                                last_bulletin_refresh = Instant::now();
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "cortex bulletin refresh task failed");
+                        }
                     }
-                    last_bulletin_refresh = Instant::now();
                 }
 
                 let cortex_config = **cortex.deps.runtime_config.cortex.load();
@@ -2162,8 +2191,8 @@ async fn fetch_memories_for_association(
 #[cfg(test)]
 mod tests {
     use super::{
-        CortexReceiverOutcome, ReceiverClosedBehavior, Signal, apply_cancelled_warmup_status,
-        handle_cortex_receiver_result, has_completed_initial_warmup,
+        BulletinRefreshOutcome, CortexReceiverOutcome, ReceiverClosedBehavior, Signal,
+        apply_cancelled_warmup_status, handle_cortex_receiver_result, has_completed_initial_warmup,
         maybe_generate_bulletin_under_lock, push_signal_into_buffer, should_execute_warmup,
         should_generate_bulletin_from_bulletin_loop, signal_from_event, summarize_signal_text,
     };
@@ -2363,7 +2392,7 @@ mod tests {
         drop(guard);
 
         let result = task.await.expect("task should join");
-        assert!(result);
+        assert_eq!(result, BulletinRefreshOutcome::SkippedFresh);
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 

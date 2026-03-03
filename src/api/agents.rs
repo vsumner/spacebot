@@ -403,8 +403,7 @@ pub(super) async fn trigger_warmup(
         let task_store_registry = state.task_store_registry.clone();
         let injection_tx = state.injection_tx.clone();
         tokio::spawn(async move {
-            let (event_tx, memory_event_tx) =
-                crate::create_process_event_buses_with_capacity(16, 64);
+            let (event_tx, memory_event_tx) = crate::create_process_event_buses();
             let deps = crate::AgentDeps {
                 agent_id: Arc::from(agent_id.as_str()),
                 memory_search,
