@@ -76,6 +76,19 @@ fn should_generate_bulletin_from_bulletin_loop(
     age_secs >= warmup_config.refresh_secs.max(1)
 }
 
+const SIGNAL_BUFFER_CAPACITY: usize = 100;
+const BULLETIN_REFRESH_FAILURE_BACKOFF_BASE_SECS: u64 = 30;
+const BULLETIN_REFRESH_FAILURE_BACKOFF_MAX_SECS: u64 = 600;
+
+fn bulletin_refresh_failure_backoff(consecutive_failures: u32) -> Duration {
+    let exponent = consecutive_failures.saturating_sub(1).min(5);
+    let multiplier = 1_u64 << exponent;
+    let seconds = BULLETIN_REFRESH_FAILURE_BACKOFF_BASE_SECS
+        .saturating_mul(multiplier)
+        .min(BULLETIN_REFRESH_FAILURE_BACKOFF_MAX_SECS);
+    Duration::from_secs(seconds)
+}
+
 fn has_completed_initial_warmup(status: &crate::config::WarmupStatus) -> bool {
     status.last_refresh_unix_ms.is_some()
         && matches!(status.state, crate::config::WarmupState::Warm)
@@ -427,7 +440,7 @@ impl Cortex {
         Self {
             deps,
             hook,
-            signal_buffer: Arc::new(RwLock::new(VecDeque::with_capacity(100))),
+            signal_buffer: Arc::new(RwLock::new(VecDeque::with_capacity(SIGNAL_BUFFER_CAPACITY))),
             system_prompt: system_prompt.into(),
         }
     }
@@ -465,7 +478,7 @@ fn signal_from_event(event: ProcessEvent) -> Signal {
         } => Signal::BranchStarted {
             branch_id,
             channel_id,
-            description,
+            description: summarize_signal_text(&description),
         },
         ProcessEvent::BranchResult {
             branch_id,
@@ -626,7 +639,7 @@ fn push_signal_into_buffer(buffer: &mut VecDeque<Signal>, signal: Signal) {
     }
 
     buffer.push_back(signal);
-    if buffer.len() > 100 {
+    if buffer.len() > SIGNAL_BUFFER_CAPACITY {
         buffer.pop_front();
     }
 }
@@ -942,7 +955,9 @@ fn spawn_bulletin_refresh_task(
             || generate_bulletin(&deps, &logger),
         )
         .await;
-        generate_profile(&deps, &logger).await;
+        if bulletin_outcome.generated() {
+            generate_profile(&deps, &logger).await;
+        }
         bulletin_outcome
     })
 }
@@ -1011,6 +1026,8 @@ async fn run_cortex_loop(
     let mut last_lag_warning_memory: Option<Instant> = None;
     let mut memory_event_stream_open = true;
     let mut refresh_task: Option<tokio::task::JoinHandle<BulletinRefreshOutcome>> = None;
+    let mut bulletin_refresh_failures: u32 = 0;
+    let mut next_bulletin_refresh_allowed_at = Instant::now();
 
     loop {
         tokio::select! {
@@ -1084,11 +1101,30 @@ async fn run_cortex_loop(
                 {
                     match task.await {
                         Ok(outcome) => {
-                            if outcome.generated() {
-                                last_bulletin_refresh = Instant::now();
+                            let now = Instant::now();
+                            if outcome.is_success() {
+                                last_bulletin_refresh = now;
+                                bulletin_refresh_failures = 0;
+                                next_bulletin_refresh_allowed_at = now;
+                            } else {
+                                bulletin_refresh_failures =
+                                    bulletin_refresh_failures.saturating_add(1);
+                                let backoff =
+                                    bulletin_refresh_failure_backoff(bulletin_refresh_failures);
+                                next_bulletin_refresh_allowed_at = now + backoff;
+                                tracing::warn!(
+                                    failures = bulletin_refresh_failures,
+                                    backoff_secs = backoff.as_secs(),
+                                    "cortex bulletin refresh failed; applying retry backoff"
+                                );
                             }
                         }
                         Err(error) => {
+                            let now = Instant::now();
+                            bulletin_refresh_failures = bulletin_refresh_failures.saturating_add(1);
+                            let backoff =
+                                bulletin_refresh_failure_backoff(bulletin_refresh_failures);
+                            next_bulletin_refresh_allowed_at = now + backoff;
                             tracing::warn!(%error, "cortex bulletin refresh task failed");
                         }
                     }
@@ -1096,7 +1132,10 @@ async fn run_cortex_loop(
 
                 let cortex_config = **cortex.deps.runtime_config.cortex.load();
                 let bulletin_interval = Duration::from_secs(cortex_config.bulletin_interval_secs.max(1));
-                if refresh_task.is_none() && last_bulletin_refresh.elapsed() >= bulletin_interval {
+                if refresh_task.is_none()
+                    && last_bulletin_refresh.elapsed() >= bulletin_interval
+                    && Instant::now() >= next_bulletin_refresh_allowed_at
+                {
                     refresh_task = Some(spawn_bulletin_refresh_task(
                         cortex.deps.clone(),
                         logger.clone(),
