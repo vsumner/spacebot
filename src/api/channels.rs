@@ -291,7 +291,10 @@ pub(super) async fn cancel_process(
             };
 
             if let Some(channel_state) = channel_state
-                && channel_state.cancel_worker(worker_id).await.is_ok()
+                && channel_state
+                    .cancel_worker_with_reason(worker_id, "cancelled via API")
+                    .await
+                    .is_ok()
             {
                 return Ok(Json(CancelProcessResponse {
                     success: true,
@@ -344,7 +347,7 @@ pub(super) async fn cancel_process(
                 .parse()
                 .map_err(|_| StatusCode::BAD_REQUEST)?;
             channel_state
-                .cancel_branch(branch_id)
+                .cancel_branch_with_reason(branch_id, "cancelled via API")
                 .await
                 .map_err(|_| StatusCode::NOT_FOUND)?;
             Ok(Json(CancelProcessResponse {

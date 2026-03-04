@@ -40,6 +40,8 @@ pub(super) struct CortexSection {
     tick_interval_secs: u64,
     worker_timeout_secs: u64,
     branch_timeout_secs: u64,
+    detached_worker_timeout_retry_limit: u8,
+    supervisor_kill_budget_per_tick: usize,
     circuit_breaker_threshold: u8,
     bulletin_interval_secs: u64,
     bulletin_max_words: usize,
@@ -168,6 +170,8 @@ pub(super) struct CortexUpdate {
     tick_interval_secs: Option<u64>,
     worker_timeout_secs: Option<u64>,
     branch_timeout_secs: Option<u64>,
+    detached_worker_timeout_retry_limit: Option<u8>,
+    supervisor_kill_budget_per_tick: Option<usize>,
     circuit_breaker_threshold: Option<u8>,
     bulletin_interval_secs: Option<u64>,
     bulletin_max_words: Option<usize>,
@@ -265,6 +269,8 @@ pub(super) async fn get_agent_config(
             tick_interval_secs: cortex.tick_interval_secs,
             worker_timeout_secs: cortex.worker_timeout_secs,
             branch_timeout_secs: cortex.branch_timeout_secs,
+            detached_worker_timeout_retry_limit: cortex.detached_worker_timeout_retry_limit,
+            supervisor_kill_budget_per_tick: cortex.supervisor_kill_budget_per_tick,
             circuit_breaker_threshold: cortex.circuit_breaker_threshold,
             bulletin_interval_secs: cortex.bulletin_interval_secs,
             bulletin_max_words: cortex.bulletin_max_words,
@@ -582,6 +588,12 @@ fn update_cortex_table(
     }
     if let Some(v) = cortex.branch_timeout_secs {
         table["branch_timeout_secs"] = toml_edit::value(v as i64);
+    }
+    if let Some(v) = cortex.detached_worker_timeout_retry_limit {
+        table["detached_worker_timeout_retry_limit"] = toml_edit::value(v as i64);
+    }
+    if let Some(v) = cortex.supervisor_kill_budget_per_tick {
+        table["supervisor_kill_budget_per_tick"] = toml_edit::value(v as i64);
     }
     if let Some(v) = cortex.circuit_breaker_threshold {
         table["circuit_breaker_threshold"] = toml_edit::value(v as i64);

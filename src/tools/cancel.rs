@@ -83,6 +83,7 @@ impl Tool for CancelTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let reason = args.reason.as_deref().unwrap_or("cancelled by tool");
         match args.process_type.as_str() {
             "branch" => {
                 let branch_id = args
@@ -90,7 +91,7 @@ impl Tool for CancelTool {
                     .parse::<BranchId>()
                     .map_err(|e| CancelError(format!("Invalid branch ID: {e}")))?;
                 self.state
-                    .cancel_branch(branch_id)
+                    .cancel_branch_with_reason(branch_id, reason)
                     .await
                     .map_err(CancelError)?;
             }
@@ -100,7 +101,7 @@ impl Tool for CancelTool {
                     .parse::<WorkerId>()
                     .map_err(|e| CancelError(format!("Invalid worker ID: {e}")))?;
                 self.state
-                    .cancel_worker(worker_id)
+                    .cancel_worker_with_reason(worker_id, reason)
                     .await
                     .map_err(CancelError)?;
             }

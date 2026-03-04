@@ -343,6 +343,7 @@ pub struct AgentDeps {
     /// Populated after all agents are initialized.
     pub task_store_registry:
         Arc<arc_swap::ArcSwap<std::collections::HashMap<String, Arc<tasks::TaskStore>>>>,
+    pub process_control_registry: Arc<agent::process_control::ProcessControlRegistry>,
     /// Sender for injecting messages into channels from outside the normal
     /// inbound message flow (e.g. cross-agent task completion notifications).
     pub injection_tx: tokio::sync::mpsc::Sender<ChannelInjection>,
