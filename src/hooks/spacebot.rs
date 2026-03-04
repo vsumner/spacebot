@@ -465,7 +465,6 @@ where
         _internal_call_id: &str,
         args: &str,
     ) -> ToolCallHookAction {
-
         self.saw_tool_call
             .store(true, std::sync::atomic::Ordering::Relaxed);
 
