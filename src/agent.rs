@@ -10,7 +10,6 @@ pub mod compactor;
 pub mod cortex;
 pub mod cortex_chat;
 pub mod ingestion;
-pub mod process_control;
 #[cfg(test)]
 mod invariant_harness;
 pub mod process_control;
