@@ -279,6 +279,8 @@ pub fn create_process_event_buses_with_capacity(
     tokio::sync::broadcast::Sender<ProcessEvent>,
     tokio::sync::broadcast::Sender<ProcessEvent>,
 ) {
+    let control_event_capacity = control_event_capacity.max(1);
+    let memory_event_capacity = memory_event_capacity.max(1);
     let (event_tx, _event_rx) = tokio::sync::broadcast::channel(control_event_capacity);
     let (memory_event_tx, _memory_event_rx) =
         tokio::sync::broadcast::channel(memory_event_capacity);

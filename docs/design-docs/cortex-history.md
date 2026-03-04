@@ -22,7 +22,7 @@ Only things the cortex **did**, not things it passively observed. Every action f
 | `observation_created` | Cortex created an observation memory | memory_id, content_preview |
 | `health_check` | Periodic health summary | kill_skipped_due_to_lag, kill_budget, kill_attempts, kill_actions, worker_timeout_secs, branch_timeout_secs, pruned_dead_channels |
 
-These map to the phases in `cortex-implementation.md`: bulletin (exists today), maintenance (Phase 3), health supervision (Phase 2), consolidation (Phase 4). The table schema supports all of them from day one even though only bulletin events will be emitted initially. The rest light up as the cortex implementation progresses.
+These map to the phases in `cortex-implementation.md`: bulletin (exists today), maintenance (Phase 3), health supervision (Phase 2, implemented), consolidation (Phase 4). Health supervision currently emits `worker_killed`, `branch_killed`, `circuit_breaker_tripped`, and `health_check`; maintenance and consolidation emit their own events as those phases land.
 
 ## Data Model
 

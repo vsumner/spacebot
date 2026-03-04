@@ -593,7 +593,8 @@ fn update_cortex_table(
         table["detached_worker_timeout_retry_limit"] = toml_edit::value(v as i64);
     }
     if let Some(v) = cortex.supervisor_kill_budget_per_tick {
-        table["supervisor_kill_budget_per_tick"] = toml_edit::value(v as i64);
+        table["supervisor_kill_budget_per_tick"] =
+            toml_edit::value(i64::try_from(v).map_err(|_| StatusCode::BAD_REQUEST)?);
     }
     if let Some(v) = cortex.circuit_breaker_threshold {
         table["circuit_breaker_threshold"] = toml_edit::value(v as i64);
@@ -844,6 +845,33 @@ id = "main"
         };
 
         let result = update_warmup_table(&mut doc, agent_idx, &update);
+        assert_eq!(result, Err(StatusCode::BAD_REQUEST));
+    }
+
+    #[test]
+    fn test_update_cortex_table_rejects_large_usize_value() {
+        let mut doc: toml_edit::DocumentMut = r#"
+[[agents]]
+id = "main"
+"#
+        .parse()
+        .expect("failed to parse test TOML");
+
+        let agent_idx =
+            find_or_create_agent_table(&mut doc, "main").expect("failed to find/create agent");
+        let update = CortexUpdate {
+            tick_interval_secs: None,
+            worker_timeout_secs: None,
+            branch_timeout_secs: None,
+            detached_worker_timeout_retry_limit: None,
+            supervisor_kill_budget_per_tick: Some(usize::MAX),
+            circuit_breaker_threshold: None,
+            bulletin_interval_secs: None,
+            bulletin_max_words: None,
+            bulletin_max_turns: None,
+        };
+
+        let result = update_cortex_table(&mut doc, agent_idx, &update);
         assert_eq!(result, Err(StatusCode::BAD_REQUEST));
     }
 }

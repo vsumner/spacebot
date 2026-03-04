@@ -83,7 +83,7 @@ The supervisor role is now active and still fully programmatic (no LLM loop for 
 
 Detached ready-task workers use a lifecycle state machine:
 
-```
+```text
 0 active -> 1 completing -> 3 terminal
 0 active -> 2 killing    -> 3 terminal
 ```

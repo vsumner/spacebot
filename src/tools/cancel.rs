@@ -83,7 +83,12 @@ impl Tool for CancelTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let reason = args.reason.as_deref().unwrap_or("cancelled by tool");
+        let reason = args
+            .reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+            .unwrap_or("cancelled by tool");
         match args.process_type.as_str() {
             "branch" => {
                 let branch_id = args
@@ -108,7 +113,11 @@ impl Tool for CancelTool {
             other => return Err(CancelError(format!("Unknown process type: {other}"))),
         }
 
-        let message = if let Some(reason) = &args.reason {
+        let message = if args
+            .reason
+            .as_deref()
+            .is_some_and(|reason| !reason.trim().is_empty())
+        {
             format!(
                 "{} {} cancelled: {reason}",
                 args.process_type, args.process_id

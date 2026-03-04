@@ -142,7 +142,7 @@ impl ChannelState {
             handle.abort();
         }
 
-        let reason = reason.trim();
+        let reason = crate::summarize_first_non_empty_line(reason, crate::EVENT_SUMMARY_MAX_CHARS);
         let result = if reason.is_empty() {
             "Worker cancelled.".to_string()
         } else {
@@ -151,17 +151,22 @@ impl ChannelState {
 
         self.process_run_logger
             .log_worker_completed(worker_id, &result, false);
-        self.deps
-            .event_tx
-            .send(ProcessEvent::WorkerComplete {
-                agent_id: self.deps.agent_id.clone(),
-                worker_id,
-                channel_id: Some(self.channel_id.clone()),
-                result,
-                notify: true,
-                success: false,
-            })
-            .ok();
+        if let Err(error) = self.deps.event_tx.send(ProcessEvent::WorkerComplete {
+            agent_id: self.deps.agent_id.clone(),
+            worker_id,
+            channel_id: Some(self.channel_id.clone()),
+            result,
+            notify: true,
+            success: false,
+        }) {
+            tracing::warn!(
+                %error,
+                agent_id = %self.deps.agent_id,
+                worker_id = %worker_id,
+                channel_id = %self.channel_id,
+                "failed to emit synthetic worker completion event"
+            );
+        }
 
         Ok(())
     }
@@ -190,7 +195,7 @@ impl ChannelState {
         };
 
         handle.abort();
-        let reason = reason.trim();
+        let reason = crate::summarize_first_non_empty_line(reason, crate::EVENT_SUMMARY_MAX_CHARS);
         let conclusion = if reason.is_empty() {
             "Branch cancelled.".to_string()
         } else {
@@ -198,15 +203,20 @@ impl ChannelState {
         };
         self.process_run_logger
             .log_branch_completed(branch_id, &conclusion);
-        self.deps
-            .event_tx
-            .send(ProcessEvent::BranchResult {
-                agent_id: self.deps.agent_id.clone(),
-                branch_id,
-                channel_id: self.channel_id.clone(),
-                conclusion,
-            })
-            .ok();
+        if let Err(error) = self.deps.event_tx.send(ProcessEvent::BranchResult {
+            agent_id: self.deps.agent_id.clone(),
+            branch_id,
+            channel_id: self.channel_id.clone(),
+            conclusion,
+        }) {
+            tracing::warn!(
+                %error,
+                agent_id = %self.deps.agent_id,
+                branch_id = %branch_id,
+                channel_id = %self.channel_id,
+                "failed to emit synthetic branch result event"
+            );
+        }
         Ok(())
     }
 }
@@ -1685,11 +1695,24 @@ impl Channel {
                 conclusion,
                 ..
             } => {
-                let mut branches = self.state.active_branches.write().await;
-                if branches.remove(branch_id).is_none() {
+                let was_active = self
+                    .state
+                    .active_branches
+                    .write()
+                    .await
+                    .remove(branch_id)
+                    .is_some();
+                let was_memory_persistence = self.memory_persistence_branches.remove(branch_id);
+                let _ = self.branch_reply_targets.remove(branch_id);
+                if !was_active {
+                    if was_memory_persistence {
+                        tracing::info!(
+                            branch_id = %branch_id,
+                            "stale memory-persistence branch completion ignored"
+                        );
+                    }
                     return Ok(());
-                };
-                drop(branches);
+                }
 
                 run_logger.log_branch_completed(*branch_id, conclusion);
 
@@ -1702,8 +1725,7 @@ impl Channel {
                 // Memory persistence branches complete silently — no history
                 // injection, no re-trigger. The work (memory saves) already
                 // happened inside the branch via tool calls.
-                if self.memory_persistence_branches.remove(branch_id) {
-                    self.branch_reply_targets.remove(branch_id);
+                if was_memory_persistence {
                     tracing::info!(branch_id = %branch_id, "memory persistence branch completed");
                 } else {
                     // Regular branch: accumulate result for the next retrigger.
