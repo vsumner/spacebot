@@ -403,11 +403,11 @@ pub(crate) fn event_is_for_channel(event: &ProcessEvent, channel_id: &ChannelId)
         | ProcessEvent::AgentMessageReceived {
             channel_id: event_channel,
             ..
-        }
-        | ProcessEvent::TextDelta {
+        } => event_channel == channel_id,
+        ProcessEvent::TextDelta {
             channel_id: event_channel,
             ..
-        } => event_channel == channel_id,
+        } => event_channel.as_ref() == Some(channel_id),
         ProcessEvent::StatusUpdate { .. } | ProcessEvent::TaskUpdated { .. } => false,
     }
 }

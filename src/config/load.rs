@@ -1355,6 +1355,12 @@ impl Config {
                     circuit_breaker_threshold: c
                         .circuit_breaker_threshold
                         .unwrap_or(base_defaults.cortex.circuit_breaker_threshold),
+                    detached_worker_timeout_retry_limit: c
+                        .detached_worker_timeout_retry_limit
+                        .unwrap_or(base_defaults.cortex.detached_worker_timeout_retry_limit),
+                    supervisor_kill_budget_per_tick: c
+                        .supervisor_kill_budget_per_tick
+                        .unwrap_or(base_defaults.cortex.supervisor_kill_budget_per_tick),
                     bulletin_interval_secs: c
                         .bulletin_interval_secs
                         .unwrap_or(base_defaults.cortex.bulletin_interval_secs),
@@ -1364,6 +1370,9 @@ impl Config {
                     bulletin_max_turns: c
                         .bulletin_max_turns
                         .unwrap_or(base_defaults.cortex.bulletin_max_turns),
+                    maintenance_interval_secs: c
+                        .maintenance_interval_secs
+                        .unwrap_or(base_defaults.cortex.maintenance_interval_secs),
                     association_interval_secs: c
                         .association_interval_secs
                         .unwrap_or(base_defaults.cortex.association_interval_secs),
@@ -1373,6 +1382,18 @@ impl Config {
                     association_updates_threshold: c
                         .association_updates_threshold
                         .unwrap_or(base_defaults.cortex.association_updates_threshold),
+                    maintenance_decay_rate: c
+                        .maintenance_decay_rate
+                        .unwrap_or(base_defaults.cortex.maintenance_decay_rate),
+                    maintenance_prune_threshold: c
+                        .maintenance_prune_threshold
+                        .unwrap_or(base_defaults.cortex.maintenance_prune_threshold),
+                    maintenance_min_age_days: c
+                        .maintenance_min_age_days
+                        .unwrap_or(base_defaults.cortex.maintenance_min_age_days),
+                    maintenance_merge_similarity_threshold: c
+                        .maintenance_merge_similarity_threshold
+                        .unwrap_or(base_defaults.cortex.maintenance_merge_similarity_threshold),
                     association_max_per_pass: c
                         .association_max_per_pass
                         .unwrap_or(base_defaults.cortex.association_max_per_pass),
@@ -1564,6 +1585,12 @@ impl Config {
                         circuit_breaker_threshold: c
                             .circuit_breaker_threshold
                             .unwrap_or(defaults.cortex.circuit_breaker_threshold),
+                        detached_worker_timeout_retry_limit: c
+                            .detached_worker_timeout_retry_limit
+                            .unwrap_or(defaults.cortex.detached_worker_timeout_retry_limit),
+                        supervisor_kill_budget_per_tick: c
+                            .supervisor_kill_budget_per_tick
+                            .unwrap_or(defaults.cortex.supervisor_kill_budget_per_tick),
                         bulletin_interval_secs: c
                             .bulletin_interval_secs
                             .unwrap_or(defaults.cortex.bulletin_interval_secs),
@@ -1573,6 +1600,9 @@ impl Config {
                         bulletin_max_turns: c
                             .bulletin_max_turns
                             .unwrap_or(defaults.cortex.bulletin_max_turns),
+                        maintenance_interval_secs: c
+                            .maintenance_interval_secs
+                            .unwrap_or(defaults.cortex.maintenance_interval_secs),
                         association_interval_secs: c
                             .association_interval_secs
                             .unwrap_or(defaults.cortex.association_interval_secs),
@@ -1582,6 +1612,18 @@ impl Config {
                         association_updates_threshold: c
                             .association_updates_threshold
                             .unwrap_or(defaults.cortex.association_updates_threshold),
+                        maintenance_decay_rate: c
+                            .maintenance_decay_rate
+                            .unwrap_or(defaults.cortex.maintenance_decay_rate),
+                        maintenance_prune_threshold: c
+                            .maintenance_prune_threshold
+                            .unwrap_or(defaults.cortex.maintenance_prune_threshold),
+                        maintenance_min_age_days: c
+                            .maintenance_min_age_days
+                            .unwrap_or(defaults.cortex.maintenance_min_age_days),
+                        maintenance_merge_similarity_threshold: c
+                            .maintenance_merge_similarity_threshold
+                            .unwrap_or(defaults.cortex.maintenance_merge_similarity_threshold),
                         association_max_per_pass: c
                             .association_max_per_pass
                             .unwrap_or(defaults.cortex.association_max_per_pass),

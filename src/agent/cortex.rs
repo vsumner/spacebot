@@ -1096,6 +1096,14 @@ fn signal_from_event(event: ProcessEvent) -> Signal {
             tool_name,
             result_summary: summarize_signal_text(&result),
         },
+        ProcessEvent::TextDelta {
+            process_id,
+            text_delta,
+            ..
+        } => Signal::StatusUpdate {
+            process_id,
+            status: summarize_signal_text(&text_delta),
+        },
         ProcessEvent::MemorySaved {
             memory_id,
             channel_id,
@@ -2709,8 +2717,9 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
                         }
                         Err(panic_payload) => {
                             let panic_message = panic_payload_to_string(&*panic_payload);
-                            let error_message =
-                                scrub(format!("Worker failed: worker task panicked: {panic_message}"));
+                            let error_message = scrub(format!(
+                                "Worker failed: worker task panicked: {panic_message}"
+                            ));
                             run_logger.log_worker_completed(worker_id, &error_message, false);
                             let requeue_result = task_store
                                 .update(

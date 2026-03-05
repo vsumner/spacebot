@@ -804,18 +804,30 @@ pub struct CortexConfig {
     pub worker_timeout_secs: u64,
     pub branch_timeout_secs: u64,
     pub circuit_breaker_threshold: u8,
+    pub detached_worker_timeout_retry_limit: u8,
+    pub supervisor_kill_budget_per_tick: usize,
     /// Interval in seconds between memory bulletin refreshes.
     pub bulletin_interval_secs: u64,
     /// Target word count for the memory bulletin.
     pub bulletin_max_words: usize,
     /// Max LLM turns for bulletin generation.
     pub bulletin_max_turns: usize,
+    /// Interval in seconds between maintenance runs when enabled.
+    pub maintenance_interval_secs: u64,
     /// Interval in seconds between association passes.
     pub association_interval_secs: u64,
     /// Minimum cosine similarity to create a RelatedTo edge.
     pub association_similarity_threshold: f32,
     /// Minimum cosine similarity to create an Updates edge (near-duplicate).
     pub association_updates_threshold: f32,
+    /// Decay rate for memory retention during maintenance.
+    pub maintenance_decay_rate: f32,
+    /// Similarity threshold used during maintenance pruning.
+    pub maintenance_prune_threshold: f32,
+    /// Minimum age, in days, before maintenance prunes memories.
+    pub maintenance_min_age_days: i64,
+    /// Similarity threshold used for maintenance merges.
+    pub maintenance_merge_similarity_threshold: f32,
     /// Max associations to create per pass (rate limit).
     pub association_max_per_pass: usize,
 }
@@ -827,12 +839,19 @@ impl Default for CortexConfig {
             worker_timeout_secs: 300,
             branch_timeout_secs: 60,
             circuit_breaker_threshold: 3,
+            detached_worker_timeout_retry_limit: 3,
+            supervisor_kill_budget_per_tick: usize::MAX,
             bulletin_interval_secs: 3600,
             bulletin_max_words: 1500,
             bulletin_max_turns: 15,
+            maintenance_interval_secs: 900,
             association_interval_secs: 300,
             association_similarity_threshold: 0.85,
             association_updates_threshold: 0.95,
+            maintenance_decay_rate: 0.16,
+            maintenance_prune_threshold: 0.17,
+            maintenance_min_age_days: 15,
+            maintenance_merge_similarity_threshold: 0.98,
             association_max_per_pass: 100,
         }
     }
