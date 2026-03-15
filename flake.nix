@@ -35,6 +35,7 @@
             ./src
             ./migrations
             ./prompts
+            ./vendor
           ];
         };
 
